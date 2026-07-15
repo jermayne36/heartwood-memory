@@ -10,6 +10,26 @@ All notable changes to `heartwood-memory` are documented here.
 ### Changed
 - Named production reranker helpers now inherit the same CrossEncoder input clipping, batch-size control, and inference-mode safeguards as the warm recall daemon path.
 
+## [0.2.0] — Licensing update: source-available under BSL 1.1
+
+Starting with 0.2.0, the Heartwood Memory core is source-available under the
+Business Source License 1.1 (BSL 1.1) instead of MIT. What this means:
+
+- You can still read the source, run it locally, develop against it, evaluate
+  it, and self-host it for non-production use — at no charge, at any size.
+- Small organizations can also run it in production at no charge (see the
+  license for the definition). Larger organizations need a commercial license
+  to run it in production.
+- Each release converts automatically to Apache License 2.0 four years after
+  it ships.
+- Versions 0.1.0–0.1.2 remain MIT-licensed, permanently. We have yanked them
+  on PyPI so new installs get 0.2.0; you can still install them by exact pin.
+  We are not revoking anything.
+
+Why: it keeps the core readable and free to try and self-host while asking
+larger production users to fund the project. "Source-available" is not the
+same as OSI "open source," and we've updated our wording to say so accurately.
+
 ## [0.1.2] - 2026-07-03
 
 ### Fixed
