@@ -1,0 +1,25 @@
+HEARTWOOD MEMORY — LICENSING NOTICE (effective with version 0.2.0)
+
+1. Prior versions remain MIT — permanently.
+   Versions 0.1.0, 0.1.1, and 0.1.2 of Heartwood Memory are licensed under
+   the MIT License. That grant is perpetual and irrevocable for those
+   versions: you may continue to obtain, use, modify, and redistribute them
+   under the MIT License. Nothing in this change alters or withdraws the MIT
+   license on any previously published version.
+
+2. Version 0.2.0 and later are source-available under the Business Source
+   License 1.1.
+   Beginning with version 0.2.0, Heartwood Memory is licensed under the
+   Business Source License 1.1 (BSL 1.1). You may copy, modify, and make
+   non-production use of it at no charge; you may also make production use at
+   no charge if your organization is a Small Organization as defined in the
+   license. Other production use requires a commercial license. Each version
+   converts to the Apache License 2.0 four years after its release. The full
+   terms are in the LICENSE file that ships with each 0.2.0+ release. The
+   Business Source License is not an Open Source (OSI-approved) license.
+
+3. The 0.1.x releases are "yanked" on PyPI, not revoked.
+   The 0.1.x releases have been yanked on PyPI so that new installations
+   resolve to 0.2.0. Yanking is a PyPI convenience flag only: it does not
+   change the MIT license of those releases, and they remain installable by
+   explicit version pin (for example, pip install heartwood-memory==0.1.2).

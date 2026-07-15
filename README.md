@@ -117,9 +117,18 @@ heartwood --help
 
 ## License
 
-The core package in this repository is MIT licensed; see `LICENSE`. Commercial
-support, signed release distribution, managed key custody, and hosted services
-may be offered separately from the MIT core.
+From version 0.2.0, Heartwood Memory is source-available under the
+[Business Source License 1.1](LICENSE) (BSL 1.1) — not an OSI "open source"
+license. You may read the source, run it locally, develop against it, evaluate
+it, and self-host it for non-production use at no charge. Small organizations
+(fewer than 100 people and less than $1M annual revenue) may also run it in
+production at no charge. Larger organizations need a commercial license for
+production use. Each version converts automatically to the Apache License 2.0
+four years after its release.
+
+Versions 0.1.0–0.1.2 are MIT-licensed and remain so permanently. See
+[NOTICE](NOTICE) for details. Commercial support, managed key custody, and
+hosted services are available separately.
 
 ## Current Bias
 
