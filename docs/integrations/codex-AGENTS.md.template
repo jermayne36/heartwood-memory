@@ -1,0 +1,24 @@
+# AGENTS.md Template: Heartwood Memory for Codex
+
+Paste this into the repository or user-level `AGENTS.md` that Codex reads after
+you register the `heartwood` MCP server.
+
+## Memory: use Heartwood as durable governed memory
+
+An MCP server named `heartwood` provides governed, provenance-tracked memory.
+Use it as the durable memory system of record.
+
+- Before answering anything that depends on prior decisions, project conventions,
+  user preferences, or resolved incidents, call `recall` with a natural-language
+  cue. Treat returned `truth_status`, `provenance_valid`, and policy metadata as
+  part of the context.
+- When `remember` is enabled and you learn a durable fact, call `remember` with
+  concise `content` and a stable `subject` such as the project, tenant, or user
+  id. Set `classification` and `pii` honestly. Never store secrets, passwords,
+  API keys, tokens, or private credential material.
+- To explain why a memory was returned, call `explain_recall` with the
+  `recall_id`.
+- On an erasure request, call `forget` with the exact `subject`. If `forget` is
+  not enabled in the MCP allowlist, stop and route the request to the operator.
+- Do not treat local agent summaries as governed records. Heartwood is the
+  auditable memory store for this workspace.

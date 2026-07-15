@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "heartwood-memory": {
+      "command": "/absolute/path/to/.venv/bin/python",
+      "args": [
+        "-m",
+        "heartwood.adapters.mcp_server"
+      ],
+      "env": {
+        "HEARTWOOD_DB_PATH": ".heartwood/heartwood.db",
+        "HEARTWOOD_TENANT": "tenant:ops",
+        "HEARTWOOD_MCP_ALLOWED_TOOLS": "recall,explain_recall,health"
+      }
+    }
+  }
+}

@@ -1,0 +1,35 @@
+# Python/runtime noise
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.venv/
+
+# JavaScript/runtime noise
+node_modules/
+
+# Local Heartwood runtime state used by .mcp.json and Docker volumes.
+.heartwood/
+
+# Local configuration and credentials.
+.env*
+.*-credentials*
+.team-token*
+.team-*-token*
+.mcp.json
+/*.token
+*.pem
+*.p8
+*.key
+*.p12
+
+# Root-local SQLite databases and their write-ahead-log sidecars.
+/*.db
+/*.db-wal
+/*.db-shm
+
+# Root-local memory exchange inputs and generated import reports.
+/*.jsonl
+/*-report.json

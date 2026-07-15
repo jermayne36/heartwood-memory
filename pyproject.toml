@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "heartwood-memory"
+version = "0.1.2"
+description = "Governed, provenance-first agent memory for AI systems."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+  { name = "Heartwood Memory" }
+]
+keywords = [
+  "agent-memory",
+  "ai-agents",
+  "governance",
+  "provenance",
+  "retrieval",
+  "database",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Database",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "cryptography>=42",
+  "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+crypto = [
+  "cryptography>=42",
+]
+sqlite = [
+  "sqlite-vec>=0.1.6",
+]
+models = [
+  "sentence-transformers>=3",
+]
+recall = [
+  "sentence-transformers>=3",
+  "sqlite-vec>=0.1.6",
+]
+mcp = [
+  "mcp>=1",
+]
+postgres = [
+  "psycopg[binary]>=3.2",
+]
+dev = [
+  "build>=1.2",
+  "cryptography>=42",
+  "mcp>=1",
+  "psycopg[binary]>=3.2",
+  "sqlite-vec>=0.1.6",
+]
+
+[project.scripts]
+heartwood = "heartwood.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["heartwood*"]
+
+[tool.pytest.ini_options]
+markers = [
+  "real_model: opt-in tests that load sentence-transformers models and assert RSS bounds",
+]
