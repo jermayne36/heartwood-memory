@@ -1,0 +1,8 @@
+include LICENSE
+include NOTICE
+include README.md
+include CHANGELOG.md
+include server.json
+recursive-include heartwood *.py *.md
+recursive-include scripts *.py
+recursive-include tests *.py

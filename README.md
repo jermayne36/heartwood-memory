@@ -1,5 +1,7 @@
 # Heartwood Memory
 
+<!-- mcp-name: io.github.jermayne36/heartwood-memory -->
+
 **Heartwood Memory is a governed memory store for AI agents: provenance-signed
 audit, policy-gated recall, tenant isolation, and a per-subject key-destruction
 proof on erasure.**

@@ -10,6 +10,20 @@ All notable changes to `heartwood-memory` are documented here.
 ### Changed
 - Named production reranker helpers now inherit the same CrossEncoder input clipping, batch-size control, and inference-mode safeguards as the warm recall daemon path.
 
+## [0.2.1] - 2026-07-16
+
+### Added
+- Added a release guard that rejects builds when the runtime `heartwood.__version__` and `pyproject.toml` package version differ.
+- Added Official MCP Registry metadata, the required PyPI ownership marker, and a `uvx heartwood-memory` MCP server entry point with its runtime dependencies.
+- Included LICENSE, NOTICE, README, and package README data explicitly in source and wheel build configuration.
+
+### Fixed
+- Synchronized package metadata and runtime version reporting at `0.2.1`.
+- MCP initialization now reports the Heartwood package version instead of the MCP SDK version, and module execution no longer emits a pre-import warning.
+
+### Changed
+- The PyPI long description now carries the README authority and evidence-boundary improvements introduced in commit `a923ea6`.
+
 ## [0.2.0] — Licensing update: source-available under BSL 1.1
 
 Starting with 0.2.0, the Heartwood Memory core is source-available under the

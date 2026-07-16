@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .. import __version__
 from ..client import Heartwood
 from ..ergonomics import attr_pairs, list_value, normalize_tenant, policy_from, principal_from
 from .memory_tool import MemoryToolBackend
@@ -324,6 +325,10 @@ def build_server(db: Heartwood | None = None, backend: MemoryToolBackend | None 
     backend = backend or MemoryToolBackend(db)
     api = MCPMemoryAPI(db, backend)
     mcp = FastMCP(name)
+    protocol_server = getattr(mcp, "_mcp_server", None)
+    if protocol_server is None or not hasattr(protocol_server, "version"):
+        raise RuntimeError("installed MCP SDK cannot report the Heartwood server version")
+    protocol_server.version = __version__
     allowed_tools = allowed_tools_from_env()
     warning = _mutating_exposure_warning(allowed_tools)
     if warning:
