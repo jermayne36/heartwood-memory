@@ -1,5 +1,23 @@
 # Heartwood Memory
 
+**Heartwood Memory is a governed memory store for AI agents: provenance-signed
+audit, policy-gated recall, tenant isolation, and a per-subject key-destruction
+proof on erasure.**
+
+> **License at a glance.** Heartwood Memory 0.2.0 and later is
+> source-available under the [Business Source License 1.1](LICENSE) (BSL 1.1),
+> not an OSI "open source" license. Non-production use is free at any size.
+> Small Organizations—fewer than 100 employees and independent contractors and
+> less than $1M in prior-tax-year revenue, as adjusted from 2019 under the
+> license—may also use it in production at no charge. Each version converts
+> automatically to the Apache License 2.0 four years after release. Versions
+> 0.1.0–0.1.2 were MIT-licensed and remain MIT-licensed permanently.
+
+[Website](https://heartwoodmemory.com/) ·
+[Compare Heartwood](https://heartwoodmemory.com/vs) ·
+[FAQ](https://heartwoodmemory.com/faq) ·
+[PyPI](https://pypi.org/project/heartwood-memory/)
+
 **Governed, source-auditable memory for AI agents, embedded beside your existing systems of record.**
 
 Heartwood is a cryptographic trust root for agent memory: every memory is signed,
