@@ -1,0 +1,61 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.jermayne36/heartwood-memory",
+  "title": "Heartwood Memory",
+  "description": "Governed agent recall with signed provenance and policy gates. BUSL-1.1; not OSI open source.",
+  "version": "0.2.1",
+  "websiteUrl": "https://heartwoodmemory.com/",
+  "repository": {
+    "url": "https://github.com/jermayne36/heartwood-memory",
+    "source": "github",
+    "id": "1302039271"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "heartwood-memory",
+      "version": "0.2.1",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "HEARTWOOD_DB_PATH",
+          "description": "Path to the local Heartwood SQLite database.",
+          "format": "filepath",
+          "isRequired": true,
+          "isSecret": false,
+          "placeholder": "heartwood.db"
+        },
+        {
+          "name": "HEARTWOOD_TENANT",
+          "description": "Tenant identifier used to isolate memories.",
+          "default": "tenant:default",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "HEARTWOOD_MCP_ALLOWED_TOOLS",
+          "description": "Comma-separated MCP tool allowlist; the default is read-only.",
+          "default": "recall,explain_recall,health",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    }
+  ],
+  "_meta": {
+    "io.modelcontextprotocol.registry/publisher-provided": {
+      "com.heartwoodmemory": {
+        "license": "BUSL-1.1",
+        "licenseCategory": "source-available; not OSI open source",
+        "links": {
+          "pypi": "https://pypi.org/project/heartwood-memory/",
+          "faq": "https://heartwoodmemory.com/faq"
+        }
+      }
+    }
+  }
+}

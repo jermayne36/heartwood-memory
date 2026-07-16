@@ -12,6 +12,8 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
+from check_version import assert_versions_match
+
 ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
 
@@ -133,6 +135,8 @@ def verify_manifest(path: Path) -> None:
 
 
 def main() -> None:
+    version = assert_versions_match(ROOT / "pyproject.toml", ROOT / "heartwood" / "__init__.py")
+    print(f"Version guard passed: {version}")
     wheels = build_wheel()
     manifest = write_manifest(wheels)
     verify_manifest(manifest)

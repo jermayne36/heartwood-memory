@@ -7,11 +7,12 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from heartwood import Heartwood  # noqa: E402
+from heartwood import Heartwood, __version__  # noqa: E402
 from heartwood.adapters.mcp_server import (  # noqa: E402
     MCPMemoryAPI,
     _mutating_exposure_warning,
     allowed_tools_from_env,
+    build_server,
 )
 from heartwood.importers.markdown import dev_models  # noqa: E402
 
@@ -180,12 +181,21 @@ def test_mcp_forget_rejects_unknown_mode():
             api.close()
 
 
+def test_mcp_initialize_reports_heartwood_version():
+    mcp, db, _backend = build_server()
+    try:
+        assert mcp._mcp_server.version == __version__
+    finally:
+        db.close()
+
+
 def main():
     test_mcp_governed_tenant_recall_and_no_denied_side_channel()
     test_mcp_memory_tool_surface_still_confined()
     test_r2_mcp_allowed_tools_env_recall_only()
     test_a4_mcp_allowlist_fail_closed_default()
     test_mcp_forget_rejects_unknown_mode()
+    test_mcp_initialize_reports_heartwood_version()
     print("MCP HARDENING TESTS PASSED")
 
 
