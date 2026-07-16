@@ -43,7 +43,7 @@ verification raises a non-zero exit.
 
 ## PyPI Publication
 
-`heartwood-memory` is published on PyPI at version `0.1.2`.
+`heartwood-memory` is published on PyPI at version `0.2.1`.
 
 Buyer install:
 
@@ -55,3 +55,24 @@ heartwood --help
 
 Future public releases still require owner-controlled PyPI credentials, release
 notes approval, and legal/trademark clearance for the next version.
+
+## Production Consumer Gate
+
+After publishing a Heartwood core release, and before merging any repository
+split or package-tree removal, EdukasAI operators must repin and smoke the live
+recall consumer from the private team workspace:
+
+```bash
+HEARTWOOD_TEAM_WORKSPACE=/path/to/EdukasAI-Team
+HEARTWOOD_RELEASE_VERSION=0.2.1 \
+HEARTWOOD_RELEASE_WHEEL_SHA256=b08a303c281b611bde4baf01f53658eac2d3dcc6bed271be5e136e0462a548f2 \
+  bash "$HEARTWOOD_TEAM_WORKSPACE/scripts/heartwood/release-consumer-smoke.sh" --repin
+```
+
+The gate inventories the launchd venv and installer, verifies the released
+wheel hash, verifies imports before restart, then requires health, live recall,
+pack-lane refresh, a clean import/write-read roundtrip, no crash state, and a
+stable serving child for at least four minutes. A failed smoke automatically
+restores the captured pre-run installation and exits non-zero.
+The gate also requires the expected version to match the public repository's
+`pyproject.toml`, so a stale release command cannot approve a newer package.
