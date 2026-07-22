@@ -276,6 +276,27 @@ class Store:
         self.conn.commit()
         return cur.rowcount == 1
 
+    def update_indexed(self, mem_id: str, indexed: bool, *, expected_from: bool) -> bool:
+        # COALESCE matches how `_row_meta` reads the column: a legacy NULL is
+        # False. Without it the compare-and-swap can never match such a row, and
+        # the audited verb would report an unresolvable "changed during update".
+        cur = self.conn.execute(
+            "UPDATE memories SET indexed=? WHERE id=? AND COALESCE(indexed, 0)=?",
+            (int(indexed), mem_id, int(expected_from)),
+        )
+        self.conn.commit()
+        return cur.rowcount == 1
+
+    def update_valid_until(self, mem_id: str, valid_until: str | None, *,
+                           expected_from: str | None) -> bool:
+        cur = self.conn.execute(
+            "UPDATE memories SET valid_until=? "
+            "WHERE id=? AND (valid_until IS ? OR valid_until=?)",
+            (valid_until, mem_id, expected_from, expected_from),
+        )
+        self.conn.commit()
+        return cur.rowcount == 1
+
     def review_queue(self, tenant: str, state: str | None) -> list[dict]:
         state = getattr(state, "value", state)
         rows = self.conn.execute(
