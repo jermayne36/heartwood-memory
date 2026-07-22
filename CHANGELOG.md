@@ -11,6 +11,9 @@ All notable changes to `heartwood-memory` are documented here.
 
 ### Changed
 - `indexed` and `valid_until` now have sanctioned writers, so a direct `UPDATE` to either is documented as a policy violation in `docs/api/recall-visibility-and-retirement.md`. Previously the only way to move either column was a raw SQL write, which left no audit record of a record leaving recall.
+- Consolidation now refuses retired members. `is_member_consolidatable` enforces the record's validity window and locks out every review state that default recall hides (`rejected`, `disputed`, `superseded` — previously only `disputed`). An expired or retired record could otherwise be summarized into a brand-new `proposed` memory, reintroducing content that recall had correctly stopped returning. The locked set is now derived from `DEFAULT_HIDDEN_REVIEW_STATES` so the two gates cannot drift apart.
+- A validity bound that cannot be parsed is now treated as "not consolidatable" rather than "no bound", so a corrupt timestamp fails closed on the write-proposing path.
+- **Licensee-facing:** the `import-markdown --update` report now names the destructive step for what it is. `superseded_count` / `superseded` are renamed to `purged_count` / `purged` (these rows are deleted, not moved to `review_state="superseded"`). The old keys are still emitted as aliases and will be **removed in 0.3.0** — update report consumers now.
 
 ## [0.2.2] - 2026-07-22
 

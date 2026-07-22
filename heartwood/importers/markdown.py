@@ -138,7 +138,7 @@ def import_markdown_corpus(
     skipped: list[dict[str, str]] = []
     warnings: list[dict[str, str]] = []
     errors: list[dict[str, str]] = []
-    superseded: list[dict[str, str]] = []
+    purged: list[dict[str, str]] = []
     tenants: Counter[str] = Counter()
 
     for source, count in source_document_counts.items():
@@ -211,11 +211,11 @@ def import_markdown_corpus(
                             if row.get("content_hash") != spec.content_hash
                         ]
                         if existing and existing.get("content_hash") == spec.content_hash:
-                            _purge_superseded_rows(db, spec, stale_prior_rows, superseded)
+                            _purge_prior_rows(db, spec, stale_prior_rows, purged)
                             existing = db.store.get_meta(existing_id)
                         elif existing and stale_prior_rows:
                             _ensure_signing_available(db, spec.created_by)
-                            _purge_superseded_rows(db, spec, stale_prior_rows, superseded)
+                            _purge_prior_rows(db, spec, stale_prior_rows, purged)
                             existing = db.store.get_meta(existing_id)
                         else:
                             post_import_purge_rows = stale_prior_rows
@@ -296,7 +296,7 @@ def import_markdown_corpus(
                                     }
                                 )
                                 tenants[tenant] += 1
-                            _purge_superseded_rows(db, spec, post_import_purge_rows, superseded)
+                            _purge_prior_rows(db, spec, post_import_purge_rows, purged)
                         else:
                             imported.append(
                                 {
@@ -311,7 +311,7 @@ def import_markdown_corpus(
                                 }
                             )
                             tenants[tenant] += 1
-                            _purge_superseded_rows(db, spec, post_import_purge_rows, superseded)
+                            _purge_prior_rows(db, spec, post_import_purge_rows, purged)
                         continue
                     source_span = {
                         "source_id": spec.source_uri,
@@ -353,7 +353,7 @@ def import_markdown_corpus(
                         }
                     )
                     tenants[tenant] += 1
-                    _purge_superseded_rows(db, spec, post_import_purge_rows, superseded)
+                    _purge_prior_rows(db, spec, post_import_purge_rows, purged)
                 except Exception as exc:  # noqa: BLE001
                     errors.append(
                         {
@@ -377,7 +377,7 @@ def import_markdown_corpus(
         skipped=skipped,
         errors=errors,
         warnings=warnings,
-        superseded=superseded,
+        purged=purged,
         tenants=tenants,
         row_counts_before=row_counts_before,
         row_counts_after=row_counts_after,
@@ -447,7 +447,7 @@ def _import_report(
     skipped: list[dict[str, str]],
     errors: list[dict[str, str]],
     warnings: list[dict[str, str]],
-    superseded: list[dict[str, str]],
+    purged: list[dict[str, str]],
     tenants: Counter[str],
     row_counts_before: dict[str, int],
     row_counts_after: dict[str, int],
@@ -465,7 +465,12 @@ def _import_report(
         "imported_count": len(imported),
         "skipped_count": len(skipped),
         "failed_count": len(errors),
-        "superseded_count": len(superseded),
+        "purged_count": len(purged),
+        # Deprecated alias for `purged_count`, kept for one release so existing
+        # report consumers keep working. These rows are deleted, not moved to
+        # review_state="superseded"; the old name described the wrong mechanism.
+        # Removal target: 0.3.0.
+        "superseded_count": len(purged),
         "source_coverage_count": source_coverage_count,
         "source_lag_count": source_lag_count,
         "memory_row_count_before": row_count_before,
@@ -476,7 +481,8 @@ def _import_report(
         "tenant_counts": dict(sorted(tenants.items())),
         "imported": imported,
         "skipped": skipped,
-        "superseded": superseded,
+        "purged": purged,
+        "superseded": purged,  # Deprecated alias for `purged`. Removal target: 0.3.0.
         "errors": errors,
         "warnings": warnings,
     }
@@ -496,15 +502,21 @@ def _source_document_counts(
     return counts
 
 
-def _purge_superseded_rows(
+def _purge_prior_rows(
     db: Heartwood,
     spec: MarkdownMemorySpec,
     rows: Iterable[dict[str, Any]],
-    superseded: list[dict[str, str]],
+    purged: list[dict[str, str]],
 ) -> None:
+    """Delete prior rows for a changed source file.
+
+    This is a hard delete via ``db.purge`` — it does not move rows to
+    ``review_state="superseded"``. To retire a governed record, transition or
+    expire it explicitly first; see docs/api/recall-visibility-and-retirement.md.
+    """
     for row in rows:
         if db.purge(row["id"], actor=spec.created_by):
-            superseded.append(
+            purged.append(
                 {
                     "path": spec.relative_path,
                     "tenant": spec.tenant,

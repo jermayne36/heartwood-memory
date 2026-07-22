@@ -411,7 +411,7 @@ def test_markdown_importer_isolates_bad_files_and_reports_errors():
         _restore_env(old_env)
 
 
-def test_markdown_importer_update_supersedes_source_path_rows():
+def test_markdown_importer_update_purges_source_path_rows():
     embedder, reranker = dev_models()
     old_env = _set_custody_env(root_byte=22, key_id="test-root-update")
     try:
@@ -429,7 +429,7 @@ def test_markdown_importer_update_supersedes_source_path_rows():
             source.write_text("Beta no-update duplicate anchor.", encoding="utf-8")
             duplicate = import_markdown_corpus([memory], db_path=db_path, embedder=embedder, reranker=reranker)
             assert duplicate["imported_count"] == 1
-            assert duplicate["superseded_count"] == 0
+            assert duplicate["purged_count"] == 0
             assert duplicate["memory_row_count_after"] == 2
 
             source.write_text("Gamma update replacement anchor.", encoding="utf-8")
@@ -441,8 +441,15 @@ def test_markdown_importer_update_supersedes_source_path_rows():
                 update=True,
             )
             assert updated["imported_count"] == 1
-            assert updated["superseded_count"] == 2
+            assert updated["purged_count"] == 2
             assert updated["memory_row_count_after"] == 1
+
+            # Deprecated aliases stay in lockstep with the canonical fields until
+            # their 0.3.0 removal, so a report consumer cannot read a stale zero.
+            assert updated["superseded_count"] == updated["purged_count"]
+            assert updated["superseded"] == updated["purged"]
+            # The rows are gone, not moved to review_state="superseded".
+            assert all(row["reason"] == "source_changed" for row in updated["purged"])
 
             db = Heartwood(path=str(db_path), tenant="tenant:ops", embedder=embedder, reranker=reranker)
             try:
@@ -500,7 +507,7 @@ def test_markdown_importer_failed_update_does_not_purge_prior_rows():
 
         assert failed["ok"] is False
         assert failed["imported_count"] == 0
-        assert failed["superseded_count"] == 0
+        assert failed["purged_count"] == 0
         assert failed["memory_row_count_before"] == 1
         assert failed["memory_row_count_after"] == 1
         assert "matching private key" in failed["errors"][0]["error"]
@@ -554,7 +561,7 @@ def test_markdown_importer_update_replaces_pinned_memory_id():
                 update=True,
             )
             assert updated["imported_count"] == 1
-            assert updated["superseded_count"] == 1
+            assert updated["purged_count"] == 1
             assert updated["imported"][0]["id"] == "pinned_edit_demo"
 
             db = Heartwood(path=str(db_path), tenant="tenant:ops", embedder=embedder, reranker=reranker)
@@ -642,7 +649,7 @@ def main():
     test_markdown_importer_reimport_imports_new_files_with_same_custody_root()
     test_markdown_importer_extends_legacy_public_key_store_after_custody_enabled()
     test_markdown_importer_isolates_bad_files_and_reports_errors()
-    test_markdown_importer_update_supersedes_source_path_rows()
+    test_markdown_importer_update_purges_source_path_rows()
     test_markdown_importer_failed_update_does_not_purge_prior_rows()
     test_markdown_importer_update_replaces_pinned_memory_id()
     test_markdown_importer_routes_large_docs_through_contextual_ingest_only_when_configured()
