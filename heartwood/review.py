@@ -30,9 +30,16 @@ LEGAL_TRANSITIONS = {
 }
 
 REVIEW_ROLES = {"reviewer", "approver"}
+# Default recall returns current truth. These states all mean "not current":
+# rejected (untrusted), disputed (contested), and superseded (replaced by a newer
+# record — a terminal state that `approve` also refuses). Callers that need the
+# retired record, e.g. audit and lineage tooling, opt back in explicitly with
+# filters={"include_review_states": [...]}, and the choice is reported in
+# explain_recall(...)["hidden_review_states"].
 DEFAULT_HIDDEN_REVIEW_STATES = {
     ReviewState.REJECTED.value,
     ReviewState.DISPUTED.value,
+    ReviewState.SUPERSEDED.value,
 }
 
 

@@ -11,6 +11,7 @@ import os
 import re
 import time
 from collections import Counter, OrderedDict
+from datetime import datetime, timezone
 from typing import Iterable
 
 from .audit import AuditLog
@@ -42,7 +43,7 @@ from .review import (
     validate_transition,
 )
 from .store import Store
-from .typed_ranking import typed_adjusted_score, valid_at
+from .typed_ranking import parse_dt, typed_adjusted_score, valid_at
 
 def _positive_int_env(name: str, default: int) -> int:
     try:
@@ -74,6 +75,10 @@ def _mirror_family(meta: dict) -> tuple[str, int] | None:
 
 def _gen_id(prefix="mem"):
     return f"{prefix}_" + base64.b32encode(os.urandom(10)).decode("ascii").lower().rstrip("=")
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _review_badge(review_state: str | None) -> str | None:
@@ -457,6 +462,15 @@ class Heartwood:
             hide_review_states.add(ReviewState.PROPOSED.value)
         hidden_review_states = set(DEFAULT_HIDDEN_REVIEW_STATES) | hide_review_states
 
+        # Validity windows are enforced on every recall. `effective_at` only moves the
+        # reference time; an absent or unparseable value falls back to now rather than
+        # disabling the filter, so an expired record can never leak through by omission.
+        # Resolved once so every candidate is judged against the same instant.
+        include_expired = bool(filters.get("include_expired"))
+        effective_at = filters.get("effective_at")
+        if parse_dt(effective_at) is None:
+            effective_at = _utc_now_iso()
+
         # 1. Policy + filters over lightweight metadata (no content/embeddings).
         def match(m):
             review_state = m.get("review_state")
@@ -503,7 +517,7 @@ class Heartwood:
                 or bool(denied_subjects & set(m.get("subject_ids") or ()))
             ):
                 return False
-            if "effective_at" in filters and not valid_at(m, filters.get("effective_at")):
+            if not include_expired and not valid_at(m, effective_at):
                 return False
             if "subject" in filters and m["subject"] != filters["subject"]:
                 return False
@@ -663,6 +677,8 @@ class Heartwood:
             ],
             "review_states": {r["id"]: r["review_state"] for r in results},
             "hidden_review_states": sorted(state for state in hidden_review_states if state),
+            "effective_at": effective_at,
+            "validity_enforced": not include_expired,
             "result_ids": [r["id"] for r in results],
             "graph_paths": self._graph_paths([r["id"] for r in results]),
         }
