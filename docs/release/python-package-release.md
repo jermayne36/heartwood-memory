@@ -63,7 +63,7 @@ split or package-tree removal, EdukasAI operators must repin and smoke the live
 recall consumer from the private team workspace:
 
 ```bash
-HEARTWOOD_TEAM_WORKSPACE=/path/to/EdukasAI-Team
+HEARTWOOD_TEAM_WORKSPACE=/path/to/orchestration-workspace
 HEARTWOOD_RELEASE_VERSION=0.2.1 \
 HEARTWOOD_RELEASE_WHEEL_SHA256=b08a303c281b611bde4baf01f53658eac2d3dcc6bed271be5e136e0462a548f2 \
   bash "$HEARTWOOD_TEAM_WORKSPACE/scripts/heartwood/release-consumer-smoke.sh" --repin

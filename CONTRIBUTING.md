@@ -34,5 +34,5 @@ is wired up.
 
 - Open an issue before starting significant work to discuss the approach.
 - Keep pull requests focused; one concern per PR.
-- All existing tests must pass (`pytest tests/`).
+- Run the local quality gate before opening a pull request: `bash scripts/check.sh`.
 - Follow the code style already present in the repository.

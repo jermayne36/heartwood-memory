@@ -5,9 +5,6 @@ report. Each check returns (name, passed, detail).
 """
 from __future__ import annotations
 
-import time
-
-
 def _provenance_complete(db, mem_id) -> bool:
     meta = db.store.get_meta(mem_id)
     if not meta:
@@ -71,7 +68,7 @@ def run_compliance_audit(db, ids, nurse_res, intern_res, nurse, intern, dpo) -> 
     fresh = nurse_res["index_lag"] == 0 and intern_res["index_lag"] == 0 and \
         db.flush_index()["index_lag"] == 0
     checks.append(("Read-your-writes (freshness)", fresh,
-                   f"index_lag=0 at recall time and after flush (synchronous indexing)"))
+                   "index_lag=0 at recall time and after flush (synchronous indexing)"))
 
     return checks, _render(db, ids, nurse_res, intern_res, checks)
 

@@ -124,5 +124,7 @@ policy-filtered before ranking.
 Adapter contract tests:
 
 ```bash
+bash scripts/check.sh
+# With Hermes Agent installed:
 python -m pytest tests/test_hermes_integration.py -q
 ```
