@@ -3,7 +3,7 @@
   "name": "io.github.jermayne36/heartwood-memory",
   "title": "Heartwood Memory",
   "description": "Governed agent recall with signed provenance and policy gates. BUSL-1.1; not OSI open source.",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "websiteUrl": "https://heartwoodmemory.com/",
   "repository": {
     "url": "https://github.com/jermayne36/heartwood-memory",
@@ -15,7 +15,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "heartwood-memory",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
