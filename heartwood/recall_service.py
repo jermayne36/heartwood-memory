@@ -494,6 +494,32 @@ class RecallEngine:
                 },
             }
 
+    def explain_recall(
+        self,
+        payload: dict[str, Any],
+        *,
+        principal: Principal | None = None,
+        allow_payload_principal: bool = True,
+    ) -> dict[str, Any]:
+        """Run a recall and return its safe, in-process explanation receipt."""
+        recall = self.recall(
+            payload,
+            principal=principal,
+            allow_payload_principal=allow_payload_principal,
+        )
+        receipt = dict(self.client(recall["tenant"]).explain_recall(recall["recall_id"]))
+        # Keep this licensee-facing surface aligned with the MCP explanation
+        # boundary: denied candidates and their reasons are not observable.
+        receipt.pop("denied", None)
+        receipt.pop("denied_reasons", None)
+        return {
+            "ok": True,
+            "tenant": recall["tenant"],
+            "principal_id": recall["principal_id"],
+            "recall_id": recall["recall_id"],
+            "explanation": receipt,
+        }
+
     def verify_roundtrip(
         self,
         payload: dict[str, Any],
@@ -953,16 +979,25 @@ def build_handler(
                     if credential is False:
                         return
                 payload = self._read_json()
-                if self.path == "/recall":
+                if self.path in {"/recall", "/explain-recall"}:
                     should_relieve_allocator = True
                     principal = credential.principal if isinstance(credential, RecallCredential) else None
-                    self._json(
-                        engine.recall(
-                            payload,
-                            principal=principal,
-                            allow_payload_principal=not credential_store.configured,
+                    if self.path == "/recall":
+                        self._json(
+                            engine.recall(
+                                payload,
+                                principal=principal,
+                                allow_payload_principal=not credential_store.configured,
+                            )
                         )
-                    )
+                    else:
+                        self._json(
+                            engine.explain_recall(
+                                payload,
+                                principal=principal,
+                                allow_payload_principal=not credential_store.configured,
+                            )
+                        )
                     return
                 if self.path == "/forget":
                     principal = credential.principal if isinstance(credential, RecallCredential) else None

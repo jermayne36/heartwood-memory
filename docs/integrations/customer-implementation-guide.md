@@ -218,6 +218,11 @@ Treat Heartwood as progressive enhancement:
    fallback.
 4. Never log the bearer token or raw secrets.
 
+For a release or deployment semantic check, send the same request shape to
+`POST /explain-recall` and verify its explanation receipt. It uses the same
+bearer authentication, runs a recall, and returns policy metadata without
+returning recall results or memory contents; keep it out of the normal hot path.
+
 The runnable example is in:
 
 ```bash

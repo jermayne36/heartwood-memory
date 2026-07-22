@@ -214,6 +214,33 @@ Required fields: `query` or `cue`. All other fields are optional and default to
 the service tenant, `agent:recall`, `internal` clearance, `k=5`, and `topc=50`.
 If bearer auth is enabled, send `Authorization: Bearer <token>`.
 
+### `POST /explain-recall`
+
+Send the same query and filter shape as `POST /recall` to run a recall and
+return its in-process explanation receipt. This is the production-verification
+surface for policy decisions such as `validity_enforced`, `effective_at`, and
+`hidden_review_states`; it uses the same bearer authentication and
+credential-bound principal as recall.
+
+The response includes the recall ID and explanation metadata only. It does not
+return memory contents, recall results, denied-candidate counts, or denied
+candidate reasons.
+
+```json
+{
+  "ok": true,
+  "tenant": "tenant:acme-payments",
+  "principal_id": "agent:recall",
+  "recall_id": "rec_...",
+  "explanation": {
+    "validity_enforced": true,
+    "effective_at": "2026-07-22T00:00:00+00:00",
+    "hidden_review_states": ["disputed", "rejected", "superseded"],
+    "result_ids": ["mem_..."]
+  }
+}
+```
+
 Response:
 
 ```json
