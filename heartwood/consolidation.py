@@ -6,12 +6,17 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from .envelope import Epistemic
-from .review import ReviewState
+from .review import DEFAULT_HIDDEN_REVIEW_STATES, ReviewState
+from .typed_ranking import parse_dt, valid_at
 
 PINNED = "pinned"
 LOCKED_EPISTEMIC = {"approved-canonical"}
 LOCKED_TRUTH = {"human_approved"}
-LOCKED_REVIEW = {"disputed"}
+# Consolidation locks exactly what default recall hides. Deriving this from the
+# recall set keeps the two gates from drifting apart: a state added to
+# DEFAULT_HIDDEN_REVIEW_STATES is locked out of consolidation automatically,
+# rather than needing a second edit here that a future change could miss.
+LOCKED_REVIEW = frozenset(DEFAULT_HIDDEN_REVIEW_STATES)
 CONSOLIDATION_EXEMPT_SCOPES: set[str] = set()
 MIN_CLUSTER = 3
 STALE_AGE_DAYS = 90
@@ -121,8 +126,26 @@ def find_consolidation_clusters(client, *, subject=None, tenant=None,
     return sorted(clusters, key=lambda cluster: (cluster.subject or "", cluster.reason, cluster.ids))
 
 
+def is_currently_valid(m: dict[str, Any], *, now: float) -> bool:
+    """True only when the record's validity window provably covers ``now``.
+
+    ``valid_at`` treats an unparseable bound as "no bound", so a corrupt
+    timestamp — e.g. a raw epoch float landing in the TEXT ``valid_until``
+    column, which ``datetime.fromisoformat`` rejects — reads as "never
+    expires". Consolidation copies member content into a brand-new record, so an
+    undeterminable window fails closed here instead of open.
+    """
+    for bound in ("valid_from", "valid_until"):
+        raw = m.get(bound)
+        if raw not in (None, "") and parse_dt(raw) is None:
+            return False
+    return valid_at(m, now)
+
+
 def is_member_consolidatable(m: dict[str, Any], *, now: float) -> bool:
     if m.get("retention") == PINNED:
+        return False
+    if not is_currently_valid(m, now=now):
         return False
     if m.get("epistemic") in LOCKED_EPISTEMIC:
         return False

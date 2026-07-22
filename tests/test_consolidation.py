@@ -20,7 +20,7 @@ from heartwood.consolidation import (  # noqa: E402
     is_safe_consolidation_cluster,
     propose_consolidation,
 )
-from heartwood.review import ReviewState  # noqa: E402
+from heartwood.review import DEFAULT_HIDDEN_REVIEW_STATES, ReviewState  # noqa: E402
 
 
 TENANT = "tenant:consolidation"
@@ -336,3 +336,69 @@ def test_propose_consolidation_births_proposed_summary_with_lineage_and_preserve
     assert all(db.store.get_meta(mem_id) is not None for mem_id in source_ids)
     assert db.store.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == before_count + 1
     assert all(proposal.id in db.store.descendants([mem_id]) for mem_id in source_ids)
+
+
+# --- Task #10005088: consolidation must respect validity + all hidden review states ---
+
+EXPIRED_AT = "2030-01-01T00:00:00Z"   # before NOW (2033-05-18T03:33:20Z)
+STILL_VALID_AT = "2040-01-01T00:00:00Z"  # after NOW
+
+
+def test_expired_member_is_not_consolidatable():
+    """An expired record must not launder into a fresh consolidation proposal."""
+    assert not is_member_consolidatable(
+        _member(id="expired_1", valid_until=EXPIRED_AT), now=NOW
+    )
+    # Positive control: an unexpired window must still consolidate, so the
+    # assertion above cannot pass merely because every member is excluded.
+    assert is_member_consolidatable(
+        _member(id="live_1", valid_until=STILL_VALID_AT), now=NOW
+    )
+    assert is_member_consolidatable(_member(id="no_window_1", valid_until=None), now=NOW)
+
+
+def test_not_yet_effective_member_is_not_consolidatable():
+    assert not is_member_consolidatable(
+        _member(id="future_1", valid_from=STILL_VALID_AT), now=NOW
+    )
+
+
+def test_unparseable_validity_fails_closed():
+    """A raw epoch float in the TEXT valid_until column must not read as 'no expiry'."""
+    assert not is_member_consolidatable(
+        _member(id="corrupt_1", valid_until="1753146000.0"), now=NOW
+    )
+
+
+def test_hidden_review_states_are_not_consolidatable():
+    """Every state default recall hides must also be locked out of consolidation."""
+    for state in sorted(DEFAULT_HIDDEN_REVIEW_STATES):
+        assert not is_member_consolidatable(
+            _member(id=f"hidden_{state}", review_state=state), now=NOW
+        ), f"review_state={state!r} leaked into consolidation"
+    # Positive control: visible states still consolidate.
+    assert is_member_consolidatable(
+        _member(id="accepted_1", review_state=ReviewState.ACCEPTED.value), now=NOW
+    )
+
+
+def test_cluster_with_retired_member_is_not_safe():
+    assert not is_safe_consolidation_cluster(
+        [_member(id="expired_c", valid_until=EXPIRED_AT), *_safe_cluster()[1:]], now=NOW
+    )
+    assert not is_safe_consolidation_cluster(
+        [
+            _member(id="superseded_c", review_state=ReviewState.SUPERSEDED.value),
+            *_safe_cluster()[1:],
+        ],
+        now=NOW,
+    )
+    assert not is_safe_consolidation_cluster(
+        [
+            _member(id="rejected_c", review_state=ReviewState.REJECTED.value),
+            *_safe_cluster()[1:],
+        ],
+        now=NOW,
+    )
+    # Positive control: an all-live cluster still consolidates.
+    assert is_safe_consolidation_cluster(_safe_cluster(), now=NOW)

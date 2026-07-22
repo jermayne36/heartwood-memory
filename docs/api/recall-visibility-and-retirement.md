@@ -166,14 +166,18 @@ prior change can be put on the record rather than left implicit.
 
 ## Warning: `import-markdown --update` purges, it does not supersede
 
-The markdown importer's update path is destructive, and its vocabulary hides
-that. When `--update` re-imports a source file whose content hash has changed,
-`_purge_superseded_rows` (`heartwood/importers/markdown.py`) calls `db.purge()`
-on every prior row for that source path.
+The markdown importer's update path is destructive. When `--update` re-imports a
+source file whose content hash has changed, `_purge_prior_rows`
+(`heartwood/importers/markdown.py`) calls `db.purge()` on every prior row for
+that source path.
 
-The receipt field is named `superseded` / `superseded_count`, but **no row is
-moved to `review_state = "superseded"`.** The prior rows are deleted. A field
-named for mechanism 3 is performing mechanism 4.
+**No row is moved to `review_state = "superseded"` — the prior rows are
+deleted.** The receipt reports this under `purged` / `purged_count`.
+
+> **Deprecated:** these fields were previously named `superseded` /
+> `superseded_count`, which named mechanism 3 for work that performs mechanism
+> 4. Both old keys are still emitted as aliases of the new ones and will be
+> removed in 0.3.0. Update report consumers to read `purged_count` / `purged`.
 
 **Do not use `--update` to retire a governed operational record.** For any record
 under review, retention, or audit obligation:
