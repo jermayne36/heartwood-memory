@@ -842,6 +842,86 @@ class Heartwood:
                           {"from": from_state, "to": to_state, "reason": reason})
         return {"id": mem_id, "from": from_state, "to": to_state}
 
+    def set_indexed(self, mem_id, indexed, *, actor, reason=""):
+        """Retire a record from — or reinstate it into — recall, with an audit event.
+
+        `indexed = 0` is the hardest visibility gate: unlike an expired or a
+        superseded record, an unindexed one has no recall opt-in that reaches it
+        (see `match()`). Flipping it therefore goes through an audited verb, never
+        a direct UPDATE. The row, its content, its provenance chain and its stored
+        embedding are untouched, so the change is fully reversible.
+
+        Re-asserting the current state is a deliberate no-op that still writes the
+        audit event, so an out-of-band change can be recorded after the fact.
+        """
+        if isinstance(indexed, bool):
+            target = indexed
+        elif isinstance(indexed, int) and indexed in (0, 1):
+            target = bool(indexed)
+        else:
+            raise TypeError(f"indexed must be a bool (or 0/1), got {indexed!r}")
+        meta = self.store.get_meta(mem_id)
+        if not meta:
+            raise KeyError(f"unknown memory id: {mem_id}")
+        from_state = bool(meta["indexed"])
+        if not self.store.update_indexed(mem_id, target, expected_from=from_state):
+            current = self.store.get_meta(mem_id)
+            current_state = None if not current else bool(current["indexed"])
+            raise RuntimeError(
+                f"indexed changed during update: expected {from_state}, got {current_state}"
+            )
+        if not target:
+            # No recall filter reaches an unindexed row — drop its warm plaintext.
+            self._text_cache.pop(mem_id, None)
+            self._token_cache.pop(mem_id, None)
+        self.audit.append(self.tenant, actor, "index_state", mem_id,
+                          {"from": from_state, "to": target, "reason": reason})
+        return {"id": mem_id, "from": from_state, "to": target}
+
+    def expire(self, mem_id, at, *, actor, reason=""):
+        """Close — or lift — a record's validity window, with an audit event.
+
+        `at` is the instant the record stops being current. `valid_until` is
+        exclusive, so `expire(mem_id, now)` retires it immediately. The row stays
+        readable via `filters={"include_expired": True}` or a back-dated
+        `effective_at`, and its content, provenance and signatures are untouched.
+        `at=None` lifts the window and reinstates the record.
+
+        The instant is normalized to ISO-8601 UTC before storage: recall parses
+        `valid_until` with `datetime.fromisoformat`, so an epoch number round-
+        tripping through the TEXT column would be unparseable and read as "no
+        expiry". An unparseable `at` raises rather than writing a value that would
+        silently fail open.
+
+        Re-asserting the current window is a deliberate no-op that still writes the
+        audit event, so an out-of-band change can be recorded after the fact.
+        """
+        meta = self.store.get_meta(mem_id)
+        if not meta:
+            raise KeyError(f"unknown memory id: {mem_id}")
+        if at is None:
+            normalized = None
+        else:
+            parsed = parse_dt(at)
+            if parsed is None:
+                raise ValueError(
+                    "expire(at=...) must be a parseable instant (ISO-8601 or epoch seconds), "
+                    f"got {at!r}"
+                )
+            normalized = parsed.astimezone(timezone.utc).isoformat()
+        from_value = meta.get("valid_until")
+        if not self.store.update_valid_until(mem_id, normalized, expected_from=from_value):
+            current = self.store.get_meta(mem_id)
+            current_value = None if not current else current.get("valid_until")
+            raise RuntimeError(
+                f"valid_until changed during expire: expected {from_value!r}, "
+                f"got {current_value!r}"
+            )
+        self.audit.append(self.tenant, actor, "expire", mem_id,
+                          {"from": from_value, "to": normalized, "reason": reason})
+        return {"id": mem_id, "from": from_value, "to": normalized,
+                "valid_now": valid_at({**meta, "valid_until": normalized}, _utc_now_iso())}
+
     def forget(self, subject, *, mode="hard", actor="system", reason="", legal_basis=""):
         purged = 0
         if mode == "hard":

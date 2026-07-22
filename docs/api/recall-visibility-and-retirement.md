@@ -11,9 +11,13 @@ before ranking (`heartwood/client.py`, `match()`):
 
 | Gate | Excluded by default | Opt back in with |
 | --- | --- | --- |
-| Index state | rows with `indexed = 0` | (none — reindex the row) |
+| Index state | rows with `indexed = 0` | no filter reaches these — reinstate with `set_indexed` |
 | Validity window | `valid_until <= now`, `valid_from > now` | `filters={"include_expired": True}` |
 | Review state | `rejected`, `disputed`, `superseded` | `filters={"include_review_states": [...]}` |
+
+Index state is the hardest of the three: an expired or superseded record is still
+reachable by an explicit opt-in, an unindexed one is reachable by none. Treat
+`indexed = 0` as removal from the answerable corpus, not as a soft filter.
 
 Every one of these decisions is reported on the recall receipt, so a caller can
 always tell what was filtered and against which instant:
@@ -44,21 +48,61 @@ db.recall(cue, principal=reader, filters={"include_expired": True})
 
 ## Retiring a record
 
-Three mechanisms exist. They are not interchangeable — only the first two
-preserve the record.
+Four mechanisms exist. They are not interchangeable — only the first three
+preserve the record. Every one of them writes an audit event; see
+[Every retirement is audited](#every-retirement-is-audited).
 
-### 1. Expire it — `valid_until` (preserves the row, reversible)
+### 1. Expire it — `db.expire` (preserves the row, reversible)
 
-Set a validity window at write time, or update `valid_until` on the stored row.
-The record stops appearing in default recall the instant the window closes,
-stays fully readable via `include_expired` or a back-dated `effective_at`, and
-its content, provenance chain, and signatures are untouched.
+```python
+db.expire(mem_id, "2026-07-21T00:00:00Z", actor="agent:ops", reason="superseded snapshot")
+```
+
+`at` is the instant the record stops being current. `valid_until` is exclusive,
+so passing the current time retires it immediately, and passing a future time
+schedules the retirement. The record stops appearing in default recall the
+instant the window closes, stays fully readable via `include_expired` or a
+back-dated `effective_at`, and its content, provenance chain, and signatures are
+untouched. `db.expire(mem_id, None, actor=...)` lifts the window again.
+
+The instant is normalized to ISO-8601 UTC before it is stored, and an
+unparseable one raises rather than being written. This matters: recall parses
+`valid_until` with `datetime.fromisoformat`, so a hand-written epoch number or
+malformed string in that column is silently read as *no expiry* — the record
+stays live while the operator believes it was retired.
+
+The returned receipt reports the change and whether the record is still inside
+its validity window:
+
+```python
+{"id": mem_id, "from": None, "to": "2026-07-21T00:00:00+00:00", "valid_now": False}
+```
 
 Use this for **time-boxed operational records** — session snapshots, working
 notes, anything with a natural shelf life. Prefer it when the record may need to
 be read again later, or when the retirement is scheduled rather than final.
 
-### 2. Supersede it — `transition_review` (preserves the row, terminal)
+### 2. Unindex it — `db.set_indexed` (preserves the row, no recall reaches it)
+
+```python
+db.set_indexed(mem_id, False, actor="agent:ops", reason="owner-authorized retirement")
+db.set_indexed(mem_id, True, actor="agent:ops", reason="reinstated")
+```
+
+Removes the record from the answerable corpus entirely: no recall filter, opt-in
+or back-dated, returns an unindexed row. The row, its content, its provenance
+chain and its stored embedding are untouched, so the change is fully reversible
+with a second call — nothing has to be re-embedded.
+
+Use this when a record must stop answering **every** query, including audit
+views, but must not be destroyed. Prefer expiry or supersession when the record
+should stay reachable to someone who asks for it explicitly.
+
+Both verbs accept a re-assertion of the state a record is already in. That is a
+deliberate no-op that still writes the audit event, so a change made out of band
+can be put on the record after the fact.
+
+### 3. Supersede it — `transition_review` (preserves the row, terminal)
 
 ```python
 db.transition_review(mem_id, "superseded", reviewer_principal, reason="replaced by v2")
@@ -73,7 +117,7 @@ default recall as a hidden review state and is recoverable with
 `superseded` is terminal — it has no legal exits, and `approve()` refuses it.
 Use this when a **newer record replaces this one** and the replacement is final.
 
-### 3. Purge it — `db.purge` (destroys the row)
+### 4. Purge it — `db.purge` (destroys the row)
 
 `db.purge(mem_id)` physically deletes the row and removes it from the index
 (`heartwood/client.py`). It appends a `purge` audit event, so the *deletion* is
@@ -81,6 +125,44 @@ on the tamper-evident record — but the content is gone. It does not crypto-shr
 the subject key; that is reserved for `forget()`.
 
 Use this only when the content itself must not persist.
+
+## Every retirement is audited
+
+Each mechanism appends one row to the hash-chained audit log, so the question
+"why did this record stop answering?" is answerable from the record itself:
+
+| Mechanism | Audit `action` | `detail` |
+| --- | --- | --- |
+| `db.expire` | `expire` | `{"from": <prior valid_until>, "to": <new>, "reason": ...}` |
+| `db.set_indexed` | `index_state` | `{"from": <prior indexed>, "to": <new>, "reason": ...}` |
+| `db.transition_review` | `review_transition` | `{"from": <state>, "to": <state>, "reason": ...}` |
+| `db.purge` | `purge` | `{}` |
+
+```python
+[(row["action"], row["principal"]) for row in db.store.iter_audit()
+ if row["target"] == mem_id]
+db.verify_audit()      # the chain still verifies after any of them
+```
+
+## Direct column writes are a policy violation
+
+`indexed` and `valid_until` decide whether a stored record still answers "what is
+true right now?". Writing either one with a direct `UPDATE` — a SQL client, a
+migration script, a helper that reaches past the client — moves a record out of
+recall with **nothing on the audit log**. The row then reads as created and never
+touched, which is precisely the claim the audit log exists to make falsifiable.
+
+Since these columns have sanctioned verbs, a direct write to either is a policy
+violation, not a shortcut:
+
+| Instead of | Use |
+| --- | --- |
+| `UPDATE memories SET indexed=0 WHERE id=...` | `db.set_indexed(mem_id, False, actor=..., reason=...)` |
+| `UPDATE memories SET valid_until=... WHERE id=...` | `db.expire(mem_id, at, actor=..., reason=...)` |
+
+If a record was already moved out of band, re-assert the same state through the
+verb. Both are no-ops on an unchanged row and still write the audit event, so the
+prior change can be put on the record rather than left implicit.
 
 ## Warning: `import-markdown --update` purges, it does not supersede
 
@@ -91,13 +173,13 @@ on every prior row for that source path.
 
 The receipt field is named `superseded` / `superseded_count`, but **no row is
 moved to `review_state = "superseded"`.** The prior rows are deleted. A field
-named for mechanism 2 is performing mechanism 3.
+named for mechanism 3 is performing mechanism 4.
 
 **Do not use `--update` to retire a governed operational record.** For any record
 under review, retention, or audit obligation:
 
 1. Retire it explicitly first — `transition_review(..., "superseded")` for a
-   final replacement, or `valid_until` for a time-boxed one.
+   final replacement, or `db.expire(...)` for a time-boxed one.
 2. Confirm the retirement landed: `db.store.get_meta(mem_id)` shows the new
    `review_state` or `valid_until`, and the row still exists.
 3. Only then re-import, so the importer finds a matching content hash and has

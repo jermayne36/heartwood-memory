@@ -2,6 +2,16 @@
 
 All notable changes to `heartwood-memory` are documented here.
 
+## [Unreleased]
+
+### Added
+- `Heartwood.expire(mem_id, at, *, actor, reason="")` — audited close (or lift) of a record's validity window. Normalizes the instant to ISO-8601 UTC, rejects an unparseable one instead of writing a value recall would read as "no expiry", and writes an `expire` audit event. `at=None` reinstates the record.
+- `Heartwood.set_indexed(mem_id, indexed, *, actor, reason="")` — audited removal from, or reinstatement into, the answerable corpus. Content, provenance and the stored embedding are untouched, so it is reversible without re-embedding; writes an `index_state` audit event.
+- Both verbs compare-and-swap against the value they observed and raise on a lost race; re-asserting the current state is a no-op that still writes the audit event, so an out-of-band change can be recorded after the fact.
+
+### Changed
+- `indexed` and `valid_until` now have sanctioned writers, so a direct `UPDATE` to either is documented as a policy violation in `docs/api/recall-visibility-and-retirement.md`. Previously the only way to move either column was a raw SQL write, which left no audit record of a record leaving recall.
+
 ## [0.2.2] - 2026-07-22
 
 ### Added
