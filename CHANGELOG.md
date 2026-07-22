@@ -2,13 +2,16 @@
 
 All notable changes to `heartwood-memory` are documented here.
 
-## [Unreleased]
+## [0.2.2] - 2026-07-22
 
 ### Added
 - Warm recall CrossEncoder staging knobs for controlled latency/quality co-runs: `HEARTWOOD_RERANKER_MODEL_PATH`, `HEARTWOOD_RERANKER_MODEL_KEY`, `HEARTWOOD_RERANKER_MAX_LENGTH`, `HEARTWOOD_TORCH_NUM_THREADS`, and `HEARTWOOD_TORCH_INTEROP_THREADS`.
 
 ### Changed
 - Named production reranker helpers now inherit the same CrossEncoder input clipping, batch-size control, and inference-mode safeguards as the warm recall daemon path.
+
+### Fixed
+- Recall now enforces validity windows and hides superseded records by default; use `include_expired` / `include_review_states` for audit views.
 
 ## [0.2.1] - 2026-07-16
 

@@ -60,4 +60,4 @@ __all__ = [
     "HUMAN_REVIEW",
     "DENIED",
 ]
-__version__ = "0.2.1"
+__version__ = "0.2.2"
