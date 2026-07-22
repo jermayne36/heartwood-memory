@@ -16,12 +16,24 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
-from agent.memory_provider import MemoryProvider
+import pytest
 
 from heartwood import Heartwood
 from heartwood.adapters.hermes import HeartwoodHermesMemoryProvider, register
 from heartwood.envelope import Policy
 from heartwood.policy import Principal
+
+# TODO(public split 73ceae4): run this contract suite in the Hermes Agent
+# integration environment once that plugin boundary is published independently.
+# The public Heartwood package intentionally does not ship the external
+# ``agent`` or ``plugins`` modules that this real-provider contract exercises.
+MemoryProvider = pytest.importorskip(
+    "agent.memory_provider",
+    reason=(
+        "requires the optional Hermes Agent integration; the public Heartwood "
+        "split does not ship agent.memory_provider or plugins.memory"
+    ),
+).MemoryProvider
 
 
 HERMES_AGENT_VERSION = "0.17.0"

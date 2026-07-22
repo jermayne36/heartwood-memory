@@ -39,6 +39,23 @@ surfaces that run on your infrastructure.
 python -m pip install "heartwood-memory[recall,mcp]"
 ```
 
+## Development checks
+
+From a source checkout, use Python 3.11 and install the declared development
+dependencies before running the local quality gate:
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
+bash scripts/check.sh
+```
+
+`scripts/check.sh` runs Ruff and the full pytest suite. The optional Hermes
+Agent contract suite reports as skipped unless its separate integration
+dependency is installed. To install the same gate as a pre-commit hook without
+overwriting another hook, run `bash scripts/install-hooks.sh`.
+
 ## 5-minute quickstart
 
 Remember a governed memory, recall it under policy, and emit a key-destruction
