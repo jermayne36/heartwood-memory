@@ -5,6 +5,16 @@ manifest.
 
 ## Build
 
+Use the supported Python 3.11 release environment and run the local gate before
+building:
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
+bash scripts/check.sh
+```
+
 ```powershell
 python scripts/build_release.py
 ```
@@ -43,7 +53,7 @@ verification raises a non-zero exit.
 
 ## PyPI Publication
 
-`heartwood-memory` is published on PyPI at version `0.2.1`.
+`heartwood-memory` is published on PyPI at version `0.2.2`.
 
 Buyer install:
 

@@ -1379,6 +1379,16 @@ def test_warm_recall_http_service_with_token():
             except error.HTTPError as exc:
                 assert exc.code == 401
 
+            try:
+                _request_json(
+                    base_url + "/explain-recall",
+                    {"query": "audit details"},
+                    method="POST",
+                )
+                raise AssertionError("unauthenticated explain-recall should have failed")
+            except error.HTTPError as exc:
+                assert exc.code == 401
+
             out = _request_json(
                 base_url + "/recall",
                 {
@@ -1394,8 +1404,37 @@ def test_warm_recall_http_service_with_token():
             assert out["result_count"] >= 1
             assert out["latency_ms"] < 500.0
 
+            explained = _request_json(
+                base_url + "/explain-recall",
+                {
+                    "query": "Acme Payments audit provenance guidance",
+                    "tenant": "tenant:acme-payments",
+                    "principal_id": "agent:orchestrator",
+                    "k": 3,
+                },
+                token=token,
+                method="POST",
+            )
+            assert explained["ok"] is True
+            assert explained["tenant"] == "tenant:acme-payments"
+            assert explained["principal_id"] == "agent:recall"
+            assert explained["recall_id"]
+            assert "results" not in explained
+            assert {
+                "cue",
+                "effective_at",
+                "hidden_review_states",
+                "result_ids",
+                "validity_enforced",
+            } <= explained["explanation"].keys()
+            assert explained["explanation"]["validity_enforced"] is True
+            assert explained["explanation"]["effective_at"]
+            assert "superseded" in explained["explanation"]["hidden_review_states"]
+            assert "denied" not in explained["explanation"]
+            assert "denied_reasons" not in explained["explanation"]
+
             metrics = _request_json(base_url + "/metrics", token=token)
-            assert metrics["recall_count"] == 1
+            assert metrics["recall_count"] == 2
             assert metrics["p95_latency_ms"] < 500.0
             assert "warmed_tenants" not in metrics
             assert "db_path" not in metrics
@@ -1411,6 +1450,45 @@ def test_warm_recall_http_service_with_token():
             assert str(db_path) not in stdout
             assert token not in stdout
             assert token not in stderr
+
+
+def test_recall_engine_explain_recall_matches_in_process_receipt():
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        memory = _write_corpus(root)
+        db_path = root / "heartwood.db"
+        embedder, reranker = dev_models()
+        import_markdown_corpus(
+            [memory],
+            db_path=db_path,
+            tenant_map={"acme": "tenant:acme-payments"},
+            embedder=embedder,
+            reranker=reranker,
+        )
+        engine = RecallEngine(
+            db_path=db_path,
+            default_tenant="tenant:acme-payments",
+            dev_models=True,
+        )
+        try:
+            explained = engine.explain_recall(
+                {"query": "Acme Payments audit provenance guidance", "k": 3},
+                principal=Principal(
+                    id="agent:recall",
+                    tenant="tenant:acme-payments",
+                    clearance="internal",
+                ),
+                allow_payload_principal=False,
+            )
+            receipt = engine.client("tenant:acme-payments").explain_recall(
+                explained["recall_id"]
+            )
+            assert explained["explanation"] == receipt
+            assert "results" not in explained
+            assert "denied" not in explained["explanation"]
+            assert "denied_reasons" not in explained["explanation"]
+        finally:
+            engine.close()
 
 
 def test_warm_recall_http_metrics_no_auth_mode():
