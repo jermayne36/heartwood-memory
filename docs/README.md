@@ -9,6 +9,7 @@ as needed.
 - [Onboarding guide](integrations/onboarding-guide.md)
 - [Customer implementation guide](integrations/customer-implementation-guide.md)
 - [Python API reference](api/python-api.md)
+- [Recall visibility and record retirement](api/recall-visibility-and-retirement.md)
 - [Platform support](platform-support.md)
 
 ## Integrations

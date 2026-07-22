@@ -213,6 +213,50 @@ def test_recall_filter_keeps_null_and_proposed_visible_with_hide_opt_in():
     assert [row["id"] for row in hide_until_approved["results"]] == baseline_ids
 
 
+def test_superseded_is_hidden_from_default_recall_with_explicit_opt_in():
+    """`transition_review` leaves `indexed` set, so recall must hide the retired row.
+
+    Superseded is terminal (LEGAL_TRANSITIONS) and `approve` refuses it, so a
+    superseded record is never current truth and must not be returned by default.
+    """
+    db = _db()
+    current_id = db.remember(
+        "Alpha policy memory, current revision.",
+        subject="subject:alpha",
+        created_by="agent:test",
+        review_state=ReviewState.ACCEPTED.value,
+        created_at=1.0,
+    )
+    retired_id = db.remember(
+        "Alpha policy memory, prior revision awaiting supersession.",
+        subject="subject:alpha",
+        created_by="agent:test",
+        review_state=ReviewState.ACCEPTED.value,
+        created_at=2.0,
+    )
+    both = db.recall("alpha policy memory revision", principal=_reader(), k=5)
+    assert {row["id"] for row in both["results"]} == {current_id, retired_id}
+
+    db.transition_review(retired_id, ReviewState.SUPERSEDED.value, _reviewer())
+    # The governance path only writes review_state; the row stays indexed.
+    assert db.store.get_meta(retired_id)["review_state"] == ReviewState.SUPERSEDED.value
+    assert db.store.get_meta(retired_id)["indexed"]
+
+    default_recall = db.recall("alpha policy memory revision", principal=_reader(), k=5)
+    assert [row["id"] for row in default_recall["results"]] == [current_id]
+    assert ReviewState.SUPERSEDED.value in db.explain_recall(
+        default_recall["recall_id"]
+    )["hidden_review_states"]
+
+    audit_view = db.recall(
+        "alpha policy memory revision",
+        principal=_reader(),
+        filters={"include_review_states": [ReviewState.SUPERSEDED.value]},
+        k=5,
+    )
+    assert {row["id"] for row in audit_view["results"]} == {current_id, retired_id}
+
+
 def test_remember_generated_births_proposed_and_default_recall_badges_it():
     db = _db()
     span = {
