@@ -4,6 +4,8 @@ All notable changes to `heartwood-memory` are documented here.
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-07-22
+
 ### Added
 - `POST /explain-recall` runs an authenticated recall request and returns its safe in-process explanation receipt for production semantic verification. The response includes policy metadata such as validity enforcement and hidden review states, but excludes memory contents and denied-candidate details.
 - `Heartwood.expire(mem_id, at, *, actor, reason="")` — audited close (or lift) of a record's validity window. Normalizes the instant to ISO-8601 UTC, rejects an unparseable one instead of writing a value recall would read as "no expiry", and writes an `expire` audit event. `at=None` reinstates the record.
@@ -20,6 +22,9 @@ All notable changes to `heartwood-memory` are documented here.
 - Consolidation now refuses retired members. `is_member_consolidatable` enforces the record's validity window and locks out every review state that default recall hides (`rejected`, `disputed`, `superseded` — previously only `disputed`). An expired or retired record could otherwise be summarized into a brand-new `proposed` memory, reintroducing content that recall had correctly stopped returning. The locked set is now derived from `DEFAULT_HIDDEN_REVIEW_STATES` so the two gates cannot drift apart.
 - A validity bound that cannot be parsed is now treated as "not consolidatable" rather than "no bound", so a corrupt timestamp fails closed on the write-proposing path.
 - **Licensee-facing:** the `import-markdown --update` report now names the destructive step for what it is. `superseded_count` / `superseded` are renamed to `purged_count` / `purged` (these rows are deleted, not moved to `review_state="superseded"`). The old keys are still emitted as aliases and will be **removed in 0.3.0** — update report consumers now.
+
+### Governance
+- **Authorization is unchanged and deliberately so.** The two new retirement verbs `expire` and `set_indexed` take an `actor` string and are **not** role-gated, matching `forget` and `purge`; `approve` and `transition_review` continue to require a role-bearing principal. `reason` remains optional on `expire` / `set_indexed`, as on `transition_review` — the audit event always records the actor and the before/after change regardless. Gating only the reversible, preservation-safe verbs while the destructive ones stay open would invert the risk gradient, and these verbs have no remote surface (the MCP tool set is a static fail-closed allowlist), so the actor field is audit attribution, not an authentication boundary. A single coherent authorization model across all five governance verbs — and whether to require a non-empty `reason` on recall-removing verbs — is tracked as a separate cross-cutting decision. See `docs/api/recall-visibility-and-retirement.md` § Authorization.
 
 ## [0.2.2] - 2026-07-22
 
