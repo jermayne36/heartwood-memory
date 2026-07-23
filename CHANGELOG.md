@@ -20,6 +20,9 @@ All notable changes to `heartwood-memory` are documented here.
   a prior receipt binding that resolves by id, hash, and audit sequence against
   the existing verified audit chain. Duplicate genesis receipts for the same
   route lineage and non-prior audit ordering are rejected.
+- Core receipt issuance now refuses `evidence_mode=production`; only visibly
+  labeled prototype receipts are accepted until a reviewed execution-
+  attestation path exists.
 
 ## [0.2.4] - 2026-07-23
 

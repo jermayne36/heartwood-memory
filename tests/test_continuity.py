@@ -457,6 +457,47 @@ def test_prototype_marker_is_machine_readable_and_visible_in_rendered_output():
         db.close()
 
 
+def test_core_refuses_production_evidence_without_execution_attestation():
+    db = _db()
+    continuity, from_contract, to_contract = _seed_contracts(db)
+    try:
+        before_rows = list(db.store.iter_audit())
+        with pytest.raises(
+            ContinuityIntegrityError,
+            match="production evidence requires validated execution attestation",
+        ):
+            continuity.issue_rotation_receipt(
+                _draft_dict(
+                    from_contract,
+                    to_contract,
+                    evidence_mode="production",
+                ),
+                principal=_admin(),
+            )
+        assert list(db.store.iter_audit()) == before_rows
+    finally:
+        db.close()
+
+
+def test_prototype_evidence_mode_still_allowed_and_labeled():
+    db = _db()
+    continuity, from_contract, to_contract = _seed_contracts(db)
+    try:
+        receipt = continuity.issue_rotation_receipt(
+            _draft_dict(
+                from_contract,
+                to_contract,
+                evidence_mode="prototype",
+            ),
+            principal=_admin(),
+        )
+        assert receipt.draft.evidence_mode.value == "prototype"
+        assert '"evidence_mode":"prototype"' in receipt.render()
+        assert continuity.verify_rotation_receipt(receipt)["ok"] is True
+    finally:
+        db.close()
+
+
 def test_receipt_rejects_unstored_contract_binding():
     db = _db()
     continuity = Continuity(db)

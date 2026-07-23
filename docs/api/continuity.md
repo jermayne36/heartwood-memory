@@ -35,6 +35,10 @@ text, raw errors, environments, commands, credentials, or callable
 representations. Failures use fixed `ErrorCategory` values. A fallback marked
 as exercised must contain its observed trigger, target route, outcome, and any
 required sanitized error category; an unobserved fallback is rejected.
+Core issuance currently accepts `evidence_mode=prototype` only. It refuses
+`evidence_mode=production` until a separately reviewed runner can supply a
+validated execution attestation; this core does not define that future
+attestation format.
 
 ## Receipt binding and audit event
 
@@ -77,4 +81,5 @@ parallel key system.
 The package imports no provider SDK and has no model-route callable protocol.
 The separate customer-side runner is responsible for executing eval cases,
 converting failures to fixed categories, and passing only validated fields into
-this core.
+this core. Until that runner's execution attestation is designed and reviewed,
+the core cannot issue production-evidence receipts.

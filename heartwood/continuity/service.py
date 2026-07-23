@@ -22,6 +22,7 @@ from .schema import (
     BaselineBinding,
     CapabilityContract,
     ContractBinding,
+    EvidenceMode,
     GenesisMarker,
     RotationReceiptDraft,
     SignedRotationReceipt,
@@ -133,6 +134,10 @@ class Continuity:
             if isinstance(draft, RotationReceiptDraft)
             else RotationReceiptDraft.from_dict(draft)
         )
+        if parsed.evidence_mode is EvidenceMode.PRODUCTION:
+            raise ContinuityIntegrityError(
+                "production evidence requires validated execution attestation"
+            )
         self._require_stored_binding(parsed.from_contract)
         self._require_stored_binding(parsed.to_contract)
         audit = AuditLog(self.heartwood.store)
