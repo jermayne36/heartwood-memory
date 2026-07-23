@@ -119,6 +119,8 @@ def main() -> int:
         f"HW_FILE_{secrets.token_hex(24)}",
     )
     sentinel_file.write_text(sentinel_values[1], encoding="utf-8")
+    if not sentinel_file.is_file() or not os.access(sentinel_file, os.R_OK):
+        raise AssertionError("negative-control sentinel file was not readable")
     previous_sentinel = os.environ.get(NEGATIVE_CONTROL_ENV_NAME)
     os.environ[NEGATIVE_CONTROL_ENV_NAME] = sentinel_values[0]
 
@@ -145,6 +147,7 @@ def main() -> int:
                 route_id=specs[0].route_id,
                 scenario=SCENARIO,
                 recalled_context=[],
+                readable_file_probe=sentinel_file,
             ),
             mode=args.route_mode,
             timeout_seconds=args.route_timeout_seconds,
@@ -216,6 +219,7 @@ def main() -> int:
                         route_id=specs[1].route_id,
                         scenario=None,
                         recalled_context=receipt["authorized"]["contents"],
+                        readable_file_probe=sentinel_file,
                     ),
                     mode=args.route_mode,
                     timeout_seconds=args.route_timeout_seconds,
@@ -229,6 +233,7 @@ def main() -> int:
                         route_id=specs[2].route_id,
                         scenario=None,
                         recalled_context=receipt["authorized"]["contents"],
+                        readable_file_probe=sentinel_file,
                     ),
                     mode=args.route_mode,
                     timeout_seconds=args.route_timeout_seconds,
@@ -256,13 +261,12 @@ def main() -> int:
             for result in route_results
         ):
             raise AssertionError("ambient sentinel variable entered a route environment")
-        if not sentinel_file.is_file() or not os.access(sentinel_file, os.R_OK):
-            raise AssertionError("negative-control sentinel file was not readable")
         if not all(result.provider_streams_clear for result in route_results):
             raise AssertionError("provider stream negative control failed")
         summary["negative_controls"] = {
             "ambient_environment_sentinel_excluded": True,
-            "readable_sentinel_file_created": True,
+            "readable_file_probe_attempted": True,
+            "readable_file_content_excluded": True,
             "provider_streams_clear": True,
             "persisted_artifacts_clear": True,
         }

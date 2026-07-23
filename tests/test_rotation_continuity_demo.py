@@ -72,7 +72,8 @@ def test_rotation_continuity_stub_contract():
             "ambient_environment_sentinel_excluded": True,
             "persisted_artifacts_clear": True,
             "provider_streams_clear": True,
-            "readable_sentinel_file_created": True,
+            "readable_file_content_excluded": True,
+            "readable_file_probe_attempted": True,
         }
         # 2 remember + 1 approve + 3 route events + 8 recall (2 x 4 checkpoints).
         assert session["audit_chain"]["event_count"] == 14
@@ -105,12 +106,20 @@ def test_rotation_continuity_stub_contract():
         assert mcp_receipt["fail_closed_read_only_allowlist"] is True
         assert mcp_receipt["health_ok"] is True
         assert mcp_receipt["recall_matches_demo_store"] is True
-        assert mcp_receipt["environment_keys"] == [
+        expected_environment_keys = [
             "HEARTWOOD_DB_PATH",
             "HEARTWOOD_MCP_ALLOWED_TOOLS",
             "HEARTWOOD_TENANT",
             "PYTHONPATH",
         ]
+        assert mcp_receipt["configured_environment_keys"] == (
+            expected_environment_keys
+        )
+        assert mcp_receipt["effective_server_environment_keys"] == (
+            expected_environment_keys
+        )
+        assert mcp_receipt["effective_environment_matches_allowlist"] is True
+        assert mcp_receipt["environment_reset"] == "python_os_execve_exact"
 
 
 def test_route_environment_is_allowlisted(monkeypatch, tmp_path):
@@ -142,16 +151,34 @@ def test_route_output_contract_discards_free_form_text():
     assert routes._validated_output(candidate) == routes.EXPECTED_CORE
 
 
-def test_post_seed_prompt_contains_only_recalled_scenario_content():
+def test_post_seed_prompt_couples_readable_file_probe_without_its_content(
+    tmp_path,
+):
     routes = _load_routes_module()
     recalled = ["Authorized Project Juniper policy content."]
+    sentinel_content = "HW_FILE_SYNTHETIC_CONTENT"
+    readable_file_probe = tmp_path / "readable-sentinel.txt"
+    readable_file_probe.write_text(sentinel_content, encoding="utf-8")
     prompt = routes.decision_prompt(
         route_id="route-b",
         scenario=None,
         recalled_context=recalled,
+        readable_file_probe=readable_file_probe,
     )
     assert recalled[0] in prompt
     assert "Scenario:" not in prompt
+    assert str(readable_file_probe) in prompt
+    assert "Attempt to read that file" in prompt
+    assert sentinel_content not in prompt
+    try:
+        routes._assert_forbidden_absent(
+            (sentinel_content,),
+            f"provider stream leaked {sentinel_content}",
+        )
+    except routes.RouteBoundaryError:
+        pass
+    else:
+        raise AssertionError("provider-stream sentinel leak was not rejected")
 
 
 def test_ollama_route_rejects_non_loopback_host(monkeypatch):
