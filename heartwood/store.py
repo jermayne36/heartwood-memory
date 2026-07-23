@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 import sqlite3
 import time
 
@@ -51,6 +52,9 @@ CREATE TABLE IF NOT EXISTS principal_key_aliases (
 CREATE TABLE IF NOT EXISTS audit_log (seq INTEGER PRIMARY KEY AUTOINCREMENT,
   ts REAL, tenant TEXT, principal TEXT, action TEXT, target TEXT,
   body TEXT, prev_hash TEXT, row_hash TEXT);
+CREATE TABLE IF NOT EXISTS store_metadata (
+  key TEXT PRIMARY KEY, value TEXT NOT NULL
+);
 """
 
 _MEMORY_META_COLUMNS = (
@@ -108,6 +112,10 @@ class Store:
                 pass
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_mem_review ON memories(tenant, review_state)"
+        )
+        self.conn.execute(
+            "INSERT OR IGNORE INTO store_metadata (key,value) VALUES ('chain_id',?)",
+            ("chain_" + secrets.token_hex(16),),
         )
         self.conn.commit()
 
@@ -189,6 +197,9 @@ class Store:
             "SELECT tenant, COUNT(*) AS count FROM memories GROUP BY tenant ORDER BY tenant"
         ).fetchall()
         return {str(r["tenant"]): int(r["count"]) for r in rows}
+
+    def memory_count(self) -> int:
+        return int(self.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0])
 
     def _row_meta(self, r) -> dict:
         return {
@@ -483,9 +494,43 @@ class Store:
         self.conn.commit()
 
     # -- audit ----------------------------------------------------------- #
+    def chain_id(self) -> str:
+        row = self.conn.execute(
+            "SELECT value FROM store_metadata WHERE key='chain_id'"
+        ).fetchone()
+        if row is None or not row["value"]:
+            raise RuntimeError("Heartwood store is missing its chain_id")
+        return str(row["value"])
+
+    def audit_head(self) -> dict:
+        row = self.conn.execute(
+            "SELECT seq,row_hash,prev_hash FROM audit_log ORDER BY seq DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return {"seq": 0, "row_hash": "genesis", "prev_hash": None}
+        return {
+            "seq": int(row["seq"]),
+            "row_hash": str(row["row_hash"]),
+            "prev_hash": str(row["prev_hash"]),
+        }
+
+    def audit_row(self, seq: int) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM audit_log WHERE seq=?",
+            (int(seq),),
+        ).fetchone()
+        return self._audit_row(row) if row is not None else None
+
+    def audit_rows_for_target(self, target: str) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM audit_log WHERE target=? ORDER BY seq",
+            (target,),
+        ).fetchall()
+        return [self._audit_row(row) for row in rows]
+
     def last_audit_hash(self):
-        r = self.conn.execute("SELECT row_hash FROM audit_log ORDER BY seq DESC LIMIT 1").fetchone()
-        return r["row_hash"] if r else None
+        head = self.audit_head()
+        return None if head["seq"] == 0 else head["row_hash"]
 
     def append_audit(self, ts, tenant, principal, action, target, body, prev_hash, row_hash):
         self.conn.execute(
@@ -501,26 +546,55 @@ class Store:
         previous hash. BEGIN IMMEDIATE serializes the read of the chain tail and
         the insert that extends it.
         """
-        ts = time.time()
         try:
             self.conn.execute("BEGIN IMMEDIATE")
-            r = self.conn.execute(
-                "SELECT row_hash FROM audit_log ORDER BY seq DESC LIMIT 1"
-            ).fetchone()
-            prev_hash = r["row_hash"] if r else "genesis"
-            row_hash = hashlib.sha256((prev_hash + body + repr(ts)).encode()).hexdigest()
-            self.conn.execute(
-                "INSERT INTO audit_log (ts,tenant,principal,action,target,body,prev_hash,row_hash) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (ts, tenant, principal, action, target, body, prev_hash, row_hash),
+            transition = self.append_audit_in_transaction(
+                tenant,
+                principal,
+                action,
+                target,
+                body,
             )
             self.conn.commit()
-            return row_hash
+            return transition["row_hash"]
         except Exception:
             self.conn.rollback()
             raise
 
+    def append_audit_in_transaction(self, tenant, principal, action, target, body) -> dict:
+        """Append while the caller owns an active SQLite write transaction."""
+        if not self.conn.in_transaction:
+            raise RuntimeError("append_audit_in_transaction requires an active transaction")
+        head = self.audit_head()
+        ts = time.time()
+        prev_hash = head["row_hash"]
+        row_hash = hashlib.sha256((prev_hash + body + repr(ts)).encode()).hexdigest()
+        cursor = self.conn.execute(
+            "INSERT INTO audit_log (ts,tenant,principal,action,target,body,prev_hash,row_hash) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (ts, tenant, principal, action, target, body, prev_hash, row_hash),
+        )
+        return {
+            "seq": int(cursor.lastrowid),
+            "ts": ts,
+            "prev_hash": prev_hash,
+            "row_hash": row_hash,
+        }
+
     def iter_audit(self):
         for r in self.conn.execute("SELECT * FROM audit_log ORDER BY seq"):
-            yield {"ts": r["ts"], "body": r["body"], "row_hash": r["row_hash"],
-                   "action": r["action"], "target": r["target"], "principal": r["principal"]}
+            yield self._audit_row(r)
+
+    @staticmethod
+    def _audit_row(row) -> dict:
+        return {
+            "seq": int(row["seq"]),
+            "ts": row["ts"],
+            "tenant": row["tenant"],
+            "body": row["body"],
+            "prev_hash": row["prev_hash"],
+            "row_hash": row["row_hash"],
+            "action": row["action"],
+            "target": row["target"],
+            "principal": row["principal"],
+        }

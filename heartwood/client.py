@@ -43,6 +43,17 @@ from .review import (
     validate_transition,
 )
 from .store import Store
+from .strict import (
+    StrictConfigurationError,
+    StrictCutoverManager,
+    StrictCutoverResolver,
+    StrictMode,
+    StrictSignatureError,
+    require_durable_strict_custody,
+    resolve_legacy_exemption,
+    resolve_strict_mode,
+    strict_failure_reason,
+)
 from .typed_ranking import parse_dt, typed_adjusted_score, valid_at
 
 def _positive_int_env(name: str, default: int) -> int:
@@ -89,20 +100,56 @@ def _review_badge(review_state: str | None) -> str | None:
 
 class Heartwood:
     def __init__(self, path=":memory:", tenant="tenant:default", embedder=None, reranker=None,
-                 index="numpy", key_custodian=None):
+                 index="numpy", key_custodian=None,
+                 strict_signatures: StrictMode | str | None = None,
+                 strict_legacy_exemption: str | None = None,
+                 strict_cutover_path: str | None = None,
+                 strict_cutover_digest: str | None = None):
         self.path = str(path)
         self.tenant = str(tenant)
         self._index_spec = index
         self._key_custodian = key_custodian
         self.store = Store(path)
+        self.keys = KeyStore(self.store, custodian=key_custodian)
+        self.signer = Signer(self.store, self.tenant, key_custodian=self.keys.custodian)
+        self.cipher = Cipher()
+        self._strict_mode = resolve_strict_mode(strict_signatures)
+        self._strict_legacy_exemption = resolve_legacy_exemption(strict_legacy_exemption)
+        self._strict_cutover_path = (
+            strict_cutover_path
+            if strict_cutover_path is not None
+            else os.environ.get("HEARTWOOD_STRICT_CUTOVER_PATH")
+        )
+        self._strict_cutover_digest = (
+            strict_cutover_digest
+            if strict_cutover_digest is not None
+            else os.environ.get("HEARTWOOD_STRICT_CUTOVER_DIGEST")
+        )
+        self._strict_cutover = None
+        try:
+            require_durable_strict_custody(self._strict_mode, self.keys.custodian)
+            if (
+                self._strict_mode is not StrictMode.OFF
+                and self._strict_legacy_exemption == "manifest"
+            ):
+                if not self._strict_cutover_path or not self._strict_cutover_digest:
+                    raise StrictConfigurationError(
+                        "strict manifest mode requires HEARTWOOD_STRICT_CUTOVER_PATH and "
+                        "HEARTWOOD_STRICT_CUTOVER_DIGEST"
+                    )
+                self._strict_cutover = StrictCutoverResolver(
+                    self.store,
+                    self._strict_cutover_path,
+                    self._strict_cutover_digest,
+                )
+        except Exception:
+            self.store.close()
+            raise
         self.embedder, self.embedder_name = embedder if embedder else get_embedder()
         self.reranker, self.reranker_name = reranker if reranker else get_reranker()
         self._embedder_pair = (self.embedder, self.embedder_name)
         self._reranker_pair = (self.reranker, self.reranker_name)
         self.enforcer = PolicyEnforcer()
-        self.keys = KeyStore(self.store, custodian=key_custodian)
-        self.signer = Signer(self.store, self.tenant, key_custodian=self.keys.custodian)
-        self.cipher = Cipher()
         self.audit = AuditLog(self.store)
         self.index = make_index(index, self.store)
         self.index.rebuild(self.store)   # populate from any pre-existing rows
@@ -121,6 +168,10 @@ class Heartwood:
             reranker=self._reranker_pair,
             index=self._index_spec,
             key_custodian=self._key_custodian,
+            strict_signatures=self._strict_mode,
+            strict_legacy_exemption=self._strict_legacy_exemption,
+            strict_cutover_path=self._strict_cutover_path,
+            strict_cutover_digest=self._strict_cutover_digest,
         )
 
     def close(self) -> None:
@@ -638,22 +689,56 @@ class Heartwood:
                 ]
         recall_id = _gen_id("recall")
         results = []
+        strict_failures = []
+        strict_exempt_ids = []
         for mem_id, score, signals in ranked:
             meta = metas_by_id.get(mem_id)
             if meta is None:
                 continue
             provenance = chain(self.store, mem_id, self.signer)
             content = content_map[mem_id]
+            actual_content_hash = hash_content(content)
             content_hash_match = (
                 bool(meta.get("content_hash"))
-                and hash_content(content) == meta["content_hash"]
+                and actual_content_hash == meta["content_hash"]
             )
             content_signature_valid = verify_meta(self.signer, meta, content)
             provenance["signature_valid"] = (
                 provenance["signature_valid"] and content_signature_valid
             )
             provenance["content_hash_match"] = content_hash_match
-            results.append({
+            strict_exempt_manifest_id = None
+            if (
+                self._strict_mode is not StrictMode.OFF
+                and (
+                    content_hash_match is not True
+                    or content_signature_valid is not True
+                )
+            ):
+                if (
+                    self._strict_cutover is not None
+                    and self._strict_cutover.match(
+                        meta=meta,
+                        actual_content_hash=actual_content_hash,
+                    )
+                ):
+                    strict_exempt_manifest_id = self._strict_cutover.manifest_id
+                    strict_exempt_ids.append(mem_id)
+                    provenance["strict_exempt"] = "pre_cutover"
+                    provenance["strict_exempt_manifest_id"] = strict_exempt_manifest_id
+                else:
+                    strict_failures.append(
+                        {
+                            "id": mem_id,
+                            "reason": strict_failure_reason(
+                                content_hash_match=content_hash_match,
+                                content_signature_valid=content_signature_valid,
+                            ),
+                        }
+                    )
+                    if self._strict_mode is StrictMode.FILTER:
+                        continue
+            result = {
                 "id": mem_id, "content": content, "score": round(score, 4),
                 "epistemic": meta["epistemic"], "confidence": meta["confidence"],
                 "kind": meta["kind"], "truth_status": meta["truth_status"],
@@ -664,7 +749,27 @@ class Heartwood:
                 "source_ids": meta["source_ids"],
                 "signals": signals,
                 "provenance": provenance,
-            })
+            }
+            if strict_exempt_manifest_id is not None:
+                result["strict_exempt"] = "pre_cutover"
+                result["strict_exempt_manifest_id"] = strict_exempt_manifest_id
+            results.append(result)
+        if strict_failures and self._strict_mode is StrictMode.ENFORCE:
+            error = StrictSignatureError(strict_failures)
+            self.audit.append(
+                self.tenant,
+                principal.id,
+                "recall_strict_rejected",
+                recall_id,
+                {
+                    "rejected": len(strict_failures),
+                    "reason_buckets": error.reason_buckets,
+                },
+            )
+            raise error
+        strict_reason_buckets = dict(
+            Counter(item["reason"] for item in strict_failures)
+        )
         self._explain[recall_id] = {
             "cue": cue, "candidates_considered": len(candidates),
             "visible": len(visible),
@@ -681,11 +786,37 @@ class Heartwood:
             "validity_enforced": not include_expired,
             "result_ids": [r["id"] for r in results],
             "graph_paths": self._graph_paths([r["id"] for r in results]),
+            "strict_mode": self._strict_mode.value,
+            "strict_dropped": {
+                "count": len(strict_failures),
+                "reason_buckets": strict_reason_buckets,
+                "ids": [item["id"] for item in strict_failures],
+                "backfill": False,
+            },
+            "strict_exempt_ids": strict_exempt_ids,
+            "strict_exempt_manifest_id": (
+                self._strict_cutover.manifest_id
+                if strict_exempt_ids and self._strict_cutover is not None
+                else None
+            ),
         }
         if len(self._explain) > 2000:
             self._explain.popitem(last=False)
-        self.audit.append(self.tenant, principal.id, "recall", recall_id,
-                          {"visible": len(visible), "denied": len(denied), "returned": len(results)})
+        self.audit.append(
+            self.tenant,
+            principal.id,
+            "recall",
+            recall_id,
+            {
+                "visible": len(visible),
+                "denied": len(denied),
+                "returned": len(results),
+                "strict_mode": self._strict_mode.value,
+                "strict_dropped": len(strict_failures),
+                "strict_reason_buckets": strict_reason_buckets,
+                "strict_exempt": len(strict_exempt_ids),
+            },
+        )
         return {"recall_id": recall_id, "results": results, "index_lag": lag}
 
     def explain_recall(self, recall_id: str) -> dict:
@@ -980,6 +1111,41 @@ class Heartwood:
         """No-op: the scaffold indexes synchronously at remember() time. The
         contract exists so production (async index build) can honor read-your-writes."""
         return {"index_lag": self.store.index_lag(self.tenant)}
+
+    def strict_preflight(self) -> dict:
+        """Scan every stored record into terminal strict-migration buckets."""
+        return StrictCutoverManager(
+            store=self.store,
+            key_store=self.keys,
+            cipher=self.cipher,
+        ).preflight()
+
+    def seal_strict_cutover(self, *, approved_report_digest: str,
+                            manifest_path: str, operator: str, reason: str = "") -> dict:
+        """Seal one exact, operator-approved preflight snapshot."""
+        return StrictCutoverManager(
+            store=self.store,
+            key_store=self.keys,
+            cipher=self.cipher,
+        ).seal(
+            approved_report_digest=approved_report_digest,
+            manifest_path=manifest_path,
+            operator=operator,
+            reason=reason,
+        )
+
+    def activate_strict_cutover(self, *, manifest_path: str,
+                                manifest_digest: str, operator: str) -> dict:
+        """Bind strict activation to the exact seal-event audit transition."""
+        return StrictCutoverManager(
+            store=self.store,
+            key_store=self.keys,
+            cipher=self.cipher,
+        ).activate(
+            manifest_path=manifest_path,
+            manifest_digest=manifest_digest,
+            operator=operator,
+        )
 
     def verify_audit(self) -> bool:
         return self.audit.verify_chain()

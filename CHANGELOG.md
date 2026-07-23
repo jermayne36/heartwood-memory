@@ -4,8 +4,17 @@ All notable changes to `heartwood-memory` are documented here.
 
 ## [Unreleased]
 
+### Added
+- Opt-in strict provenance enforcement with `StrictMode.OFF`, `FILTER`, and `ENFORCE`. FILTER returns fewer than `k` and records reason buckets; ENFORCE raises before any recall result or explanation is returned.
+- `heartwood strict-preflight` scans every stored row into reconciled terminal buckets, identifies unverifiable operator trust-import candidates, and can seal and activate an exact operator-approved cutover snapshot.
+- Snapshot-sealed strict cutover artifacts bind the complete current provenance payload through a length-safe canonical tuple hash, fingerprint exact signature bytes, use an operator-config SHA-256 pin, and emit derived-only `strict_exempt` markers for admitted pre-cutover rows.
+
 ### Changed
 - The Ed25519 release manifest now covers both the wheel and source distribution, with a SHA-256 receipt for each published artifact.
+- Audit iteration now exposes `seq` and `prev_hash`, and chain verification checks the stored previous-hash link as well as each row hash.
+
+### Governance
+- Strict legacy exemption never reads `created_at`. The existing memory-signature format still omits `created_at`; changing it in place would invalidate historical signatures, so broader versioned signed-payload coverage remains a separately reviewed migration rather than being folded into this cutover.
 
 ## [0.2.3] - 2026-07-22
 
