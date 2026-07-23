@@ -129,11 +129,11 @@ Governance you can inspect and re-run at the record level:
 
 | Receipt | What it does | Boundary today |
 |---|---|---|
-| **Signed provenance** | Every memory is signed; the signature and content hash are re-verified at read and surfaced on each result. | Re-verified and surfaced, not yet enforced as a hard read failure. |
-| **Tamper-evident audit** | Hash-chained append-only log; `verify_chain()` detects an in-place edit or dropped row. | Catches in-place tampering; tail-truncation needs an external anchor. |
-| **Policy before ranking** | Recall is restricted to cleared records before ranking; denied records are not scored, returned, or counted. | Source-auditable; multi-tenant-at-scale validation is still in progress. |
-| **Key-destruction receipt** | `forget(mode="hard")` destroys the per-subject key and purges derived artifacts. | Shows key destruction, not byte-level content deletion. |
-| **Faithfulness + egress gate** | Generated memories fail closed unless they pass a faithfulness check; rejected egress requests block the external-model call. | Explicit override stores a downweighted, review-only copy. |
+| **Signed provenance** | Every memory is signed; the signature and content hash are re-verified at read and surfaced on each result. | Default `OFF` surfaces verification state; opt-in `FILTER` drops failed records and `ENFORCE` fails before returning results. The signed scope does not cover authorization metadata. |
+| **Tamper-evident audit** | Hash-chained append-only log; `verify_chain()` detects an in-place edit or dropped row. | While the external `AnchorSink` and pinned verification root remain outside the attacker boundary, rollback at or below the latest anchor is detected; post-anchor rows remain an explicit open window. |
+| **Policy before ranking** | Recall is restricted to cleared records before ranking; denied records are not scored, returned, or counted. | Source-auditable under the committed single-trust-domain pre-seed posture; multi-tenant deployment is not claimed. |
+| **Key-destruction receipt** | `forget(mode="hard")` destroys the per-subject key and purges derived artifacts. | Reports per-subject key destruction and purge counts; it does not prove byte-level content deletion. |
+| **Faithfulness + egress gate** | Generated memories fail closed unless they pass a faithfulness check; rejected egress requests block the external-model call. | Unaccepted faithfulness results are blocked by default; `store_unaccepted=True` stores a `generated_needs_review` proposal, which typed ranking downweights. |
 
 ## Key docs
 
