@@ -1,4 +1,13 @@
-"""Strict provenance enforcement and snapshot-sealed legacy cutover support."""
+"""Strict provenance enforcement and snapshot-sealed legacy cutover support.
+
+The authenticated memory payload is exactly ``id``, ``content_hash``,
+``source.uri``, ``created_by``, and ``epistemic``; cutover manifests bind the
+tenant separately. Strict mode does not authenticate ``created_at``,
+``classification``, role/authorization metadata such as ``roles_json``, or
+``indexed`` state. Ordinary Ed25519 verification also assumes the
+``principal_keys`` registry in the same SQLite database is trustworthy; strict
+mode does not externally pin that registry.
+"""
 from __future__ import annotations
 
 import base64
@@ -114,7 +123,7 @@ def provenance_payload_hash(
     created_by: str,
     epistemic: str,
 ) -> str:
-    """Length-safe identity for every field in the current signed payload."""
+    """Length-safe identity for exactly the five currently signed fields."""
     payload = _canonical_bytes(
         [mem_id, content_hash_value, source_uri, created_by, epistemic]
     )
