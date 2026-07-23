@@ -28,6 +28,19 @@ All notable changes to `heartwood-memory` are documented here.
   static approved list; caller aliases and unapproved labels do not enter
   canonical artifacts.
 
+### Security boundaries
+
+- Documented that verified receipts establish signed content/provenance
+  authenticity, not recall exclusion, authorization integrity, tamper-proof
+  RBAC/visibility, or resistance to a principal with raw database write access.
+- Documented the pre-seed single-trust-domain assumptions: recall-decision
+  metadata is outside the signed payload, and the verification-key registry
+  remains in the mutable store. The stronger external-root pin/custody path is
+  not shipped.
+- Documented the post-fix state: prior-baseline/genesis verification fails
+  closed against the audit chain, while production evidence-mode issuance
+  remains unavailable in core pending a reviewed runner-attestation path.
+
 ## [0.2.4] - 2026-07-23
 
 ### Added

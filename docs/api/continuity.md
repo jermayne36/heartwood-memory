@@ -42,10 +42,10 @@ text, raw errors, environments, commands, credentials, or callable
 representations. Failures use fixed `ErrorCategory` values. A fallback marked
 as exercised must contain its observed trigger, target route, outcome, and any
 required sanitized error category; an unobserved fallback is rejected.
-Core issuance currently accepts `evidence_mode=prototype` only. It refuses
-`evidence_mode=production` until a separately reviewed runner can supply a
-validated execution attestation; this core does not define that future
-attestation format.
+Core issuance currently accepts `evidence_mode=prototype` only. Production
+evidence-mode issuance is unavailable in core until a separately reviewed
+runner can supply a validated execution attestation; this core does not define
+that future attestation format.
 
 ## Receipt binding and audit event
 
@@ -74,14 +74,46 @@ body; the existing `AuditLog` binds it to the exact audit sequence.
 `verify_rotation_receipt()` returns `ok=true` only when the detached signature,
 current audit event, complete audit chain, and prior-baseline or genesis
 binding all verify. Its `baseline_valid` field reports that last check
-explicitly.
+explicitly. An unresolvable or mis-ordered prior baseline fails closed. A
+duplicate genesis for the same route lineage also fails closed.
 
 Verification assumes the principal's registered public key in Heartwood's
 verification-key registry is trusted. That registry is in the mutable
-Heartwood store. Deployments requiring a stronger boundary must pin or custody
-the verification root outside that store. Durable cross-process signing also
-requires Heartwood's durable key custodian; this module does not create a
-parallel key system.
+Heartwood store, so a principal with raw database write access could replace a
+registered verification key. Deployments requiring a stronger boundary must
+pin or custody the verification root outside that store. That external
+pin/custody path is not shipped. Durable cross-process signing also requires
+Heartwood's durable key custodian; this module does not create a parallel key
+system.
+
+## Security claim scope and deployment assumptions
+
+Claim anchor: `HEARTWOOD_CLAIM_SCOPE=content_provenance_authenticity`
+
+Non-claim anchors:
+
+- `HEARTWOOD_NOT_CLAIMED=recall_exclusion`
+- `HEARTWOOD_NOT_CLAIMED=authorization_integrity`
+- `HEARTWOOD_NOT_CLAIMED=tamper_proof_rbac_or_visibility`
+- `HEARTWOOD_NOT_CLAIMED=db_compromise_resistance`
+
+A successful verification establishes authenticity only for the signed receipt
+content and the content/provenance bindings named in its payload, subject to the
+verification-root assumption above. It does not establish recall exclusion,
+authorization integrity, tamper-proof RBAC or visibility, or resistance to a
+principal that can rewrite the database.
+
+Recall decisions also use mutable metadata that is outside the signed
+provenance payload: `indexed`, `kind`, `policy_scope`, `classification`,
+roles/role groups/attributes, and `visibility`. A principal with raw database
+write access can alter recall reachability without invalidating content
+provenance. The accepted pre-seed deployment assumption is a single trust
+domain: the set of principals with any database write path must be a superset
+of the set of principals that can read all memories.
+
+A stronger deployment boundary requires the external-root work: pin or custody
+the verification root outside the mutable store and derive recall-decision
+metadata from externally anchored evidence. That work is not shipped.
 
 ## Core-only boundary
 
