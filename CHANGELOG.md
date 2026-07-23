@@ -4,6 +4,14 @@ All notable changes to `heartwood-memory` are documented here.
 
 ## [Unreleased]
 
+### Added
+- Dependency-free `heartwood.continuity` capability-contract schemas, privileged
+  `indexed=0` contract storage, and versioned signed rotation measured diffs with
+  exact audit-sequence binding.
+- Closed receipt validation for opaque identifiers, bounded deltas, fixed error
+  categories, observed fallbacks, prior baseline/eval/contract hashes, and
+  machine-readable production or prototype status.
+
 ## [0.2.4] - 2026-07-23
 
 ### Added

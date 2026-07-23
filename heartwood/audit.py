@@ -42,6 +42,43 @@ class AuditLog:
             self.after_append()
         return row_hash
 
+    def append_bound(self, tenant, principal, action, target, detail_builder) -> dict:
+        """Append an event whose minimal detail is bound to its exact audit sequence.
+
+        The builder runs while the SQLite writer lock is held and receives the
+        sequence assigned to the pending row. The row is not visible until its
+        final canonical body and hash are committed.
+        """
+        if not hasattr(self.store, "append_audit_bound_atomic"):
+            raise RuntimeError("bound audit append requires an atomic SQLite store")
+
+        def body_builder(seq):
+            detail = detail_builder(seq)
+            if not isinstance(detail, dict):
+                raise TypeError("bound audit detail builder must return a dict")
+            return json.dumps(
+                {
+                    "tenant": tenant,
+                    "principal": principal,
+                    "action": action,
+                    "target": target,
+                    "detail": detail,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+
+        transition = self.store.append_audit_bound_atomic(
+            tenant,
+            principal,
+            action,
+            target,
+            body_builder,
+        )
+        if self.after_append is not None:
+            self.after_append()
+        return transition
+
     def verify_chain(self) -> bool:
         prev = "genesis"
         for row in self.store.iter_audit():

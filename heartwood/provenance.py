@@ -219,6 +219,61 @@ class Signer:
             return hmac.compare_digest(sig, "hmac-sha256:" + mac)
         return False
 
+    def sign_detached(self, principal_id: str, payload: bytes, *, domain: bytes) -> str:
+        """Sign canonical artifact bytes under an explicit domain separator."""
+        signed_payload = _domain_payload(payload, domain)
+        if _HAVE_ED25519:
+            self.register(principal_id)
+            private_key = self._ed25519_private[principal_id]
+            public_key = self._ed25519_public[principal_id]
+            sig = private_key.sign(signed_payload)
+            return f"ed25519:{_b64e(public_key)}:{_b64e(sig)}"
+        key = self.register(principal_id)
+        mac = hmac.new(key, signed_payload, hashlib.sha256).hexdigest()
+        return "hmac-sha256:" + mac
+
+    def verify_detached(
+        self,
+        sig: str,
+        principal_id: str,
+        payload: bytes,
+        *,
+        domain: bytes,
+    ) -> bool:
+        """Verify canonical artifact bytes against the registered trust root."""
+        if not sig:
+            return False
+        signed_payload = _domain_payload(payload, domain)
+        if sig.startswith("ed25519:") and _HAVE_ED25519:
+            try:
+                _, public_text, sig_text = sig.split(":", 2)
+                public_bytes = _b64d(public_text)
+                signature = _b64d(sig_text)
+                registered = self._get_registered_keys(principal_id)
+                if not any(
+                    algorithm == "ed25519" and registered_public == public_bytes
+                    for algorithm, registered_public in registered
+                ):
+                    return False
+                public_key = ed25519.Ed25519PublicKey.from_public_bytes(public_bytes)
+                public_key.verify(signature, signed_payload)
+                return True
+            except Exception:
+                return False
+        if sig.startswith("hmac-sha256:"):
+            key = self._hmac_keys.get(principal_id)
+            if key is None:
+                return False
+            mac = hmac.new(key, signed_payload, hashlib.sha256).hexdigest()
+            return hmac.compare_digest(sig, "hmac-sha256:" + mac)
+        return False
+
+
+def _domain_payload(payload: bytes, domain: bytes) -> bytes:
+    if not isinstance(payload, bytes) or not isinstance(domain, bytes) or not domain:
+        raise TypeError("detached signing requires non-empty bytes payload and domain")
+    return domain + payload
+
 
 def verify_meta(signer: Signer, row: dict, content: str | None = None) -> bool:
     content_hash = row.get("content_hash")
