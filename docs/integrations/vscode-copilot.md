@@ -86,8 +86,9 @@ and both governed Project Juniper records for the authorized demo principal.
 ## Fallback venue
 
 If Copilot is unavailable or organization policy disables MCP, use the
-deterministic stub route only until the live-route security gate in
-`ADMIN-SECURITY.md` is cleared. A transcript demonstrates only the route
+deterministic stub route only until the administrator clears the live-route
+controls and enterprise rollout gates in
+[`ADMIN-SECURITY.md`](../../examples/rotation-continuity/ADMIN-SECURITY.md). A transcript demonstrates only the route
 executions recorded in that run. Treat the checked-in VS Code file as
 configuration evidence, not evidence of a successful deployment or
 constrained-organization validation.
