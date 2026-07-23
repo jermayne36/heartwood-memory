@@ -29,6 +29,11 @@ from .key_lifecycle import (
     rotate_tenant_root,
 )
 from .policy import Principal
+from .strict import (
+    StrictConfigurationError,
+    StrictMode,
+    StrictSignatureError,
+)
 
 __all__ = [
     "Heartwood",
@@ -59,5 +64,8 @@ __all__ = [
     "LOCAL_ONLY",
     "HUMAN_REVIEW",
     "DENIED",
+    "StrictMode",
+    "StrictConfigurationError",
+    "StrictSignatureError",
 ]
 __version__ = "0.2.3"

@@ -246,6 +246,14 @@ class MCPMemoryAPI:
                     "source_ids": r["source_ids"],
                     "provenance_valid": r["provenance"].get("signature_valid"),
                     "content_hash_match": r["provenance"].get("content_hash_match"),
+                    **(
+                        {
+                            "strict_exempt": r["strict_exempt"],
+                            "strict_exempt_manifest_id": r["strict_exempt_manifest_id"],
+                        }
+                        if r.get("strict_exempt") == "pre_cutover"
+                        else {}
+                    ),
                     "signals": r["signals"],
                 }
                 for r in out["results"]
@@ -257,6 +265,8 @@ class MCPMemoryAPI:
         explanation = dict(self.client(tenant).explain_recall(recall_id))
         explanation.pop("denied", None)
         explanation.pop("denied_reasons", None)
+        if isinstance(explanation.get("strict_dropped"), dict):
+            explanation["strict_dropped"].pop("ids", None)
         return explanation
 
     def forget(self, subject: str, tenant: str | None = None, mode: str = "hard",

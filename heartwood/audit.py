@@ -36,6 +36,8 @@ class AuditLog:
     def verify_chain(self) -> bool:
         prev = "genesis"
         for row in self.store.iter_audit():
+            if "prev_hash" in row and row["prev_hash"] != prev:
+                return False
             expect = hashlib.sha256((prev + row["body"] + repr(row["ts"])).encode()).hexdigest()
             if expect != row["row_hash"]:
                 return False

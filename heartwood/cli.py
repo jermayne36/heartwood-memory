@@ -254,6 +254,57 @@ def cmd_init_identity(args: argparse.Namespace) -> dict:
     }
 
 
+def cmd_strict_preflight(args: argparse.Namespace) -> dict:
+    embedder = reranker = None
+    if args.dev_models:
+        embedder, reranker = dev_models()
+    db = Heartwood(
+        path=args.db,
+        tenant=args.tenant,
+        embedder=embedder,
+        reranker=reranker,
+        index=args.index,
+        strict_signatures="off",
+        strict_legacy_exemption="off",
+    )
+    try:
+        if args.activate:
+            manifest_path = args.manifest or os.environ.get(
+                "HEARTWOOD_STRICT_CUTOVER_PATH"
+            )
+            manifest_digest = args.manifest_digest or os.environ.get(
+                "HEARTWOOD_STRICT_CUTOVER_DIGEST"
+            )
+            if not manifest_path or not manifest_digest:
+                raise ValueError(
+                    "strict-preflight --activate requires --manifest and "
+                    "--manifest-digest (or the matching HEARTWOOD_STRICT_* env vars)"
+                )
+            return db.activate_strict_cutover(
+                manifest_path=str(manifest_path),
+                manifest_digest=manifest_digest,
+                operator=args.operator,
+            )
+        if args.approve_report_digest:
+            if not args.manifest_out:
+                raise ValueError(
+                    "strict-preflight --approve-report-digest requires --manifest-out"
+                )
+            return db.seal_strict_cutover(
+                approved_report_digest=args.approve_report_digest,
+                manifest_path=str(args.manifest_out),
+                operator=args.operator,
+                reason=args.reason,
+            )
+        if args.manifest_out or args.manifest or args.manifest_digest:
+            raise ValueError(
+                "manifest options require --approve-report-digest or --activate"
+            )
+        return db.strict_preflight()
+    finally:
+        db.close()
+
+
 def cmd_bench_recall(args: argparse.Namespace) -> dict:
     queries = list(args.query or ())
     if args.queries_file:
@@ -592,6 +643,41 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     identity.add_argument("--key-id", default="env-root-v1")
     identity.add_argument("--output", type=Path)
     identity.set_defaults(handler=cmd_init_identity)
+
+    strict = subparsers.add_parser(
+        "strict-preflight",
+        help=(
+            "Audit every stored record for strict mode; optionally seal or activate "
+            "an exact operator-approved cutover snapshot."
+        ),
+    )
+    strict.add_argument("--db", type=Path, required=True, help="Target Heartwood SQLite database.")
+    strict.add_argument("--tenant", default="tenant:ops")
+    strict.add_argument("--operator", default="agent:strict-operator")
+    strict.add_argument("--reason", default="")
+    strict.add_argument(
+        "--approve-report-digest",
+        help="Exact report digest approved by the operator; rescanned under a write lock.",
+    )
+    strict.add_argument(
+        "--manifest-out",
+        type=Path,
+        help="New strict-cutover artifact path used with --approve-report-digest.",
+    )
+    strict.add_argument(
+        "--activate",
+        action="store_true",
+        help="Append the activation transition after validating the exact seal head.",
+    )
+    strict.add_argument("--manifest", type=Path, help="Sealed strict-cutover artifact.")
+    strict.add_argument(
+        "--manifest-digest",
+        help="Exact sha256:<hex> operator-config pin for --manifest.",
+    )
+    strict.add_argument("--dev-models", action="store_true")
+    strict.add_argument("--index", default="numpy", choices=("numpy", "auto", "sqlite-vec"))
+    strict.add_argument("--output", type=Path)
+    strict.set_defaults(handler=cmd_strict_preflight)
 
     bench = subparsers.add_parser(
         "bench-recall",

@@ -512,6 +512,8 @@ class RecallEngine:
         # boundary: denied candidates and their reasons are not observable.
         receipt.pop("denied", None)
         receipt.pop("denied_reasons", None)
+        if isinstance(receipt.get("strict_dropped"), dict):
+            receipt["strict_dropped"].pop("ids", None)
         return {
             "ok": True,
             "tenant": recall["tenant"],
