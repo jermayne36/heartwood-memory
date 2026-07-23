@@ -58,11 +58,16 @@ local structured-output API with no tools.
 
 - Heartwood is managed-key; its local process decrypts authorized content to
   serve recall.
-- Signature validity is re-verified and surfaced, not yet a hard read-enforcement
-  mode.
+- This demo runs with strict provenance enforcement off: signature validity is
+  re-verified and surfaced on each result. The opt-in `StrictMode` `FILTER` and
+  `ENFORCE` read-failure modes shipped in 0.2.4 require an operator-approved
+  cutover and are not enabled here. Strict mode authenticates the signed
+  provenance payload and content hash, not authorization metadata.
 - The current chain detects changes to the hash-bound event body or timestamp
-  and detects a dropped interior row. Loss after the latest separately protected
-  anchor remains outside detection.
+  and detects a dropped interior row. Opt-in external anchoring and the
+  `heartwood verify-audit` receipt CLI shipped in 0.2.4; this demo does not
+  configure an anchor sink. Loss after the latest separately protected anchor
+  remains outside detection.
 - This demo is not evidence of E2EE, byte-level deletion, modification
   prevention, compliance certification, or approval under a constrained
   enterprise Copilot policy.
@@ -74,11 +79,17 @@ local structured-output API with no tools.
   provenance fields, not authorization metadata such as classification or
   roles. Direct database writers remain inside the residual threat boundary
   until the signed payload is versioned to cover those fields.
+- The canonical machine-readable claim scope for this repository is anchored in
+  [`docs/api/continuity.md`](../../docs/api/continuity.md): the claim is signed
+  content/provenance authenticity. Recall exclusion, authorization integrity,
+  tamper-proof RBAC or visibility, and resistance to a principal that can
+  rewrite the database are explicitly not claimed.
 
 ## Enterprise rollout gates
 
 Before using non-synthetic data, the customer administrator should pin the
 package version, select key custody, restrict the store path, review the MCP
-allowlist, decide which provider may receive each classification, and validate
-their organization-level Copilot/MCP policies. The local unconstrained setup is
+allowlist, decide which provider may receive each classification, evaluate the
+opt-in strict provenance enforcement and external audit anchoring shipped in
+0.2.4, and validate their organization-level Copilot/MCP policies. The local unconstrained setup is
 not a substitute for that design-partner verification.

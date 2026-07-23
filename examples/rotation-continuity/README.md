@@ -114,7 +114,8 @@ each run.
 Read the [administrator security brief](ADMIN-SECURITY.md) before using the demo
 with a customer. Use synthetic data only. Heartwood is managed-key and decrypts
 in the local server to serve recall. Signed provenance is re-verified and
-surfaced rather than enforced as a hard read failure today; current signatures
+surfaced on each result; this demo does not enable the opt-in strict
+enforcement mode shipped in 0.2.4. Current signatures
 do not cover authorization metadata such as classification or roles. The audit
 verifier detects changes to the hash-bound event body or timestamp and a dropped
 interior row. Loss after the latest separately protected anchor remains outside
