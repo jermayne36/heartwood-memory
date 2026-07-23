@@ -232,6 +232,8 @@ def _run_claude(spec: RouteSpec, prompt: str, timeout_seconds: int) -> RouteResu
         "--safe-mode",
         "--no-session-persistence",
         "--tools",
+        # Verified live with Claude Code on 2026-07-22: a discrete empty value
+        # means the route receives no tools while structured output stays enabled.
         "",
         "--permission-mode",
         "dontAsk",

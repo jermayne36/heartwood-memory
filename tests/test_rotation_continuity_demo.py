@@ -49,6 +49,7 @@ def test_rotation_continuity_stub_contract():
         assert len(session["continuity"]["checkpoints"]) == 4
         assert session["audit_chain"]["verify_audit"] is True
         assert session["audit_chain"]["linkage_ok"] is True
+        # 2 remember + 1 approve + 3 route events + 8 recall (2 x 4 checkpoints).
         assert session["audit_chain"]["event_count"] == 14
         assert session["audit_chain"]["genesis_prev_hash"] == "genesis"
         assert (output_dir / "transcript.md").exists()

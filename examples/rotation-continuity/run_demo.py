@@ -42,6 +42,7 @@ SCENARIO = (
     "security approval exists; its stable token is security_approval_required."
 )
 QUERY = "Project Juniper release decision security approval region"
+# "after" means after swapping to a route; "before" means before leaving it.
 CHECKPOINTS = (
     ("route-a-before-swap", "route-a"),
     ("route-b-after-swap", "route-b"),

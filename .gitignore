@@ -33,3 +33,6 @@ node_modules/
 # Root-local memory exchange inputs and generated import reports.
 /*.jsonl
 /*-report.json
+
+# Rotation demo output when a developer intentionally keeps a local receipt.
+/examples/rotation-continuity/output*/
