@@ -23,12 +23,19 @@ recall, and `Heartwood.read_content()` does not expose it. Retrieval is through
 `Continuity.get_capability_contract()` with a same-tenant
 `continuity-admin` principal.
 
+At storage, route ids are minted from random bytes. Caller route aliases are
+used only to resolve the contract and its declared fallbacks during that
+trusted-boundary operation; they are not stored in the canonical contract.
+
 ## Closed schemas
 
-Every object and nested object rejects unknown fields. Identifiers use opaque
-prefixed tokens, numeric deltas are finite and bounded to `[-1.0, 1.0]`, enum
-fields are closed, summary counts must reconcile with the cases, and fixed
-secret sentinels are rejected before storage or signing.
+Every object and nested object rejects unknown fields. Provider/model labels
+must resolve to a small static approved pair list. Route ids are minted during
+contract storage, and receipt, run, and case ids are minted again during
+receipt issuance. Numeric deltas are finite and bounded to `[-1.0, 1.0]`,
+enum fields are closed, summary counts must reconcile with the cases, and
+fixed secret sentinels remain a defense-in-depth rejection before storage or
+signing.
 
 The receipt has no fields for prompts, memory content, model output, evidence
 text, raw errors, environments, commands, credentials, or callable

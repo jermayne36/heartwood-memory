@@ -410,8 +410,22 @@ def run_prototype(
         principal = _admin()
         continuity = Continuity(db)
         from_contract, to_contract = _contracts()
-        continuity.store_capability_contract(from_contract, principal=principal)
-        continuity.store_capability_contract(to_contract, principal=principal)
+        stored_from = continuity.store_capability_contract(
+            from_contract,
+            principal=principal,
+        )
+        stored_to = continuity.store_capability_contract(
+            to_contract,
+            principal=principal,
+        )
+        from_contract = continuity.get_capability_contract(
+            stored_from.memory_id,
+            principal=principal,
+        )
+        to_contract = continuity.get_capability_contract(
+            stored_to.memory_id,
+            principal=principal,
+        )
         measured_cases = execute_suite(
             suite,
             from_route,

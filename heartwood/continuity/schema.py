@@ -48,6 +48,10 @@ _SECRET_MARKERS = (
     "secret=",
     "token=",
 )
+_APPROVED_PROVIDER_MODELS = {
+    "provider.catalog": frozenset({"model/catalog-v1"}),
+    "prototype.stub": frozenset({"stub/from-v1", "stub/to-v1"}),
+}
 
 
 class ContinuityValidationError(ValueError):
@@ -250,6 +254,7 @@ class CapabilityContract:
         _opaque_id(self.route_id, "route_", "route_id")
         _safe_label(self.provider, "provider")
         _safe_label(self.model, "model")
+        _approved_provider_model(self.provider, self.model)
         _require_bool(self.tool_use, "tool_use")
         if not isinstance(self.structured_output, StructuredOutput):
             raise ContinuityValidationError("structured_output")
@@ -904,6 +909,11 @@ def _safe_region(value: Any) -> str:
     if not _REGION_RE.fullmatch(value):
         raise ContinuityValidationError("residency")
     return value
+
+
+def _approved_provider_model(provider: str, model: str) -> None:
+    if model not in _APPROVED_PROVIDER_MODELS.get(provider, ()):
+        raise ContinuityValidationError("approved_provider_model")
 
 
 def _safe_principal(value: Any) -> str:

@@ -9,6 +9,9 @@ outcomes, bounded numbers, and fixed error categories before it calls the
 public `heartwood.continuity` API. The result is a real signed, audit-bound
 rotation receipt labeled `evidence_mode=prototype`.
 
+The public API replaces the prototype's fixture ids with boundary-minted route,
+receipt, run, and case ids before canonical rendering.
+
 The prototype has no provider SDK, network route, subprocess, shell tool, file
 tool, or model-generated tool surface. Its run summary therefore reports
 `live_routes=0`, `stub_routes=2`, and `child_processes=0`.

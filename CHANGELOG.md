@@ -23,6 +23,10 @@ All notable changes to `heartwood-memory` are documented here.
 - Core receipt issuance now refuses `evidence_mode=production`; only visibly
   labeled prototype receipts are accepted until a reviewed execution-
   attestation path exists.
+- Contract storage and receipt issuance now mint route, receipt, run, and case
+  ids from random bytes. Provider/model labels must resolve through a small
+  static approved list; caller aliases and unapproved labels do not enter
+  canonical artifacts.
 
 ## [0.2.4] - 2026-07-23
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -160,7 +161,7 @@ def _draft_dict(
                     "attempted": True,
                     "fallback_exercised": True,
                     "trigger": "on_degraded",
-                    "target_route_id": ROUTE_A,
+                    "target_route_id": from_contract.route_id,
                     "result": "pass",
                     "error_category": None,
                 },
@@ -179,9 +180,25 @@ def _seed_contracts(
 ) -> tuple[Continuity, CapabilityContract, CapabilityContract]:
     continuity = Continuity(db)
     from_contract, to_contract = _contracts()
-    continuity.store_capability_contract(from_contract, principal=_admin())
-    continuity.store_capability_contract(to_contract, principal=_admin())
-    return continuity, from_contract, to_contract
+    stored_from = continuity.store_capability_contract(
+        from_contract,
+        principal=_admin(),
+    )
+    stored_to = continuity.store_capability_contract(
+        to_contract,
+        principal=_admin(),
+    )
+    return (
+        continuity,
+        continuity.get_capability_contract(
+            stored_from.memory_id,
+            principal=_admin(),
+        ),
+        continuity.get_capability_contract(
+            stored_to.memory_id,
+            principal=_admin(),
+        ),
+    )
 
 
 def _baseline_binding(receipt: SignedRotationReceipt) -> dict:
@@ -350,7 +367,10 @@ def test_contract_is_retrievable_only_via_privileged_api():
                 ),
             )
         loaded = continuity.get_capability_contract(stored.memory_id, principal=_admin())
-        assert loaded == contract
+        assert loaded.provider == contract.provider
+        assert loaded.model == contract.model
+        assert loaded.route_id == stored.route_id
+        assert loaded.route_id != contract.route_id
         with pytest.raises(PermissionError, match="cannot enter ordinary recall"):
             db.set_indexed(
                 stored.memory_id,
@@ -399,7 +419,7 @@ def test_receipt_binds_contract_eval_run_baseline_fallback_signature_and_audit()
             eval_suite_hash=EVAL_HASH,
         )
         assert receipt.draft.prior_baseline == GenesisMarker(is_genesis=True)
-        assert receipt.draft.run_id == RUN_ID
+        assert receipt.draft.run_id != RUN_ID
         assert receipt.draft.cases[1].fallback.exercised is True
 
         verification = continuity.verify_rotation_receipt(receipt)
@@ -409,13 +429,13 @@ def test_receipt_binds_contract_eval_run_baseline_fallback_signature_and_audit()
             "audit_event_valid": True,
             "audit_chain_valid": True,
             "baseline_valid": True,
-            "receipt_id": RECEIPT_ID,
+            "receipt_id": receipt.draft.receipt_id,
             "receipt_hash": receipt.receipt_hash,
         }
 
         audit_row = db.store.audit_row(receipt.audit_seq)
         audit_body = json.loads(audit_row["body"])
-        assert audit_body["target"] == RECEIPT_ID
+        assert audit_body["target"] == receipt.draft.receipt_id
         assert audit_body["detail"] == {
             "receipt_hash": receipt.receipt_hash,
             "lineage_hash": content_hash(
@@ -502,7 +522,11 @@ def test_receipt_rejects_unstored_contract_binding():
     db = _db()
     continuity = Continuity(db)
     from_contract, to_contract = _contracts()
-    continuity.store_capability_contract(from_contract, principal=_admin())
+    stored = continuity.store_capability_contract(from_contract, principal=_admin())
+    from_contract = continuity.get_capability_contract(
+        stored.memory_id,
+        principal=_admin(),
+    )
     try:
         draft = RotationReceiptDraft.from_dict(_draft_dict(from_contract, to_contract))
         with pytest.raises(ContinuityIntegrityError, match="contract binding not found"):
@@ -646,5 +670,89 @@ def test_prior_baseline_ordering_enforced():
         verification = continuity.verify_rotation_receipt(forged)
         assert verification["ok"] is False
         assert verification["baseline_valid"] is False
+    finally:
+        db.close()
+
+
+def test_high_entropy_identifier_and_label_not_preserved_in_canonical_output():
+    db = _db()
+    continuity = Continuity(db)
+    secret_route_a = "route_Z9x8C7v6B5n4M3q2P1w0"
+    secret_route_b = "route_Q1w2E3r4T5y6U7i8O9p0"
+    from_value = _contract_dict(secret_route_a, secret_route_b)
+    to_value = _contract_dict(secret_route_b, secret_route_a)
+    try:
+        stored_from = continuity.store_capability_contract(
+            from_value,
+            principal=_admin(),
+        )
+        stored_to = continuity.store_capability_contract(
+            to_value,
+            principal=_admin(),
+        )
+        from_contract = continuity.get_capability_contract(
+            stored_from.memory_id,
+            principal=_admin(),
+        )
+        to_contract = continuity.get_capability_contract(
+            stored_to.memory_id,
+            principal=_admin(),
+        )
+        assert secret_route_a not in from_contract.render()
+        assert secret_route_b not in from_contract.render()
+
+        draft = _draft_dict(from_contract, to_contract)
+        secret_receipt = "rot_Z9x8C7v6B5n4M3q2P1w0"
+        secret_run = "run_Q1w2E3r4T5y6U7i8O9p0"
+        secret_case = "case_A1s2D3f4G5h6J7k8L9z0"
+        draft["receipt_id"] = secret_receipt
+        draft["run_id"] = secret_run
+        draft["cases"][0]["case_id"] = secret_case
+        receipt = continuity.issue_rotation_receipt(draft, principal=_admin())
+        rendered = receipt.render()
+        for caller_value in (
+            secret_route_a,
+            secret_route_b,
+            secret_receipt,
+            secret_run,
+            secret_case,
+        ):
+            assert caller_value not in rendered
+
+        unapproved = _contract_dict(ROUTE_A, ROUTE_B)
+        unapproved["provider"] = "Z9x8C7v6B5n4M3q2P1w0"
+        unapproved["model"] = "Q1w2E3r4T5y6U7i8O9p0"
+        with pytest.raises(
+            ContinuityValidationError,
+            match="approved_provider_model",
+        ):
+            CapabilityContract.from_dict(unapproved)
+    finally:
+        db.close()
+
+
+def test_issued_ids_are_boundary_minted():
+    db = _db()
+    continuity, from_contract, to_contract = _seed_contracts(db)
+    try:
+        receipt = continuity.issue_rotation_receipt(
+            _draft_dict(from_contract, to_contract),
+            principal=_admin(),
+        )
+        minted = (
+            receipt.draft.receipt_id,
+            receipt.draft.run_id,
+            receipt.draft.from_route,
+            receipt.draft.to_route,
+            *(case.case_id for case in receipt.draft.cases),
+        )
+        assert receipt.draft.receipt_id != RECEIPT_ID
+        assert receipt.draft.run_id != RUN_ID
+        assert from_contract.route_id not in {ROUTE_A, ROUTE_B}
+        assert to_contract.route_id not in {ROUTE_A, ROUTE_B}
+        assert all(
+            re.fullmatch(r"(?:rot|run|route|case)_[0-9a-f]{32}", value)
+            for value in minted
+        )
     finally:
         db.close()

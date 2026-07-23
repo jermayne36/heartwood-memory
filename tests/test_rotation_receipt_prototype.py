@@ -109,7 +109,7 @@ def test_timeout_and_fallback_emit_only_sanitized_categories():
         timeout_case = next(
             case
             for case in receipt["cases"]
-            if case["case_id"] == "case_bet3timeout0001"
+            if case["after"] == "failed"
         )
         assert timeout_case["after"] == "failed"
         assert timeout_case["after_error_category"] == "timeout"
@@ -118,7 +118,7 @@ def test_timeout_and_fallback_emit_only_sanitized_categories():
             "error_category": None,
             "fallback_exercised": True,
             "result": "pass",
-            "target_route_id": prototype.FROM_ROUTE_ID,
+            "target_route_id": receipt["from_route"],
             "trigger": "on_error",
         }
         assert "prototype stub timeout" not in json.dumps(receipt)

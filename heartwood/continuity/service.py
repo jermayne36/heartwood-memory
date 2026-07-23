@@ -9,6 +9,7 @@ custodian. This module does not add a second key system.
 from __future__ import annotations
 
 import json
+import secrets
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -57,6 +58,7 @@ class Continuity:
 
     def __init__(self, heartwood):
         self.heartwood = heartwood
+        self._route_aliases: dict[str, str] = {}
 
     def store_capability_contract(
         self,
@@ -71,6 +73,7 @@ class Continuity:
             if isinstance(contract, CapabilityContract)
             else CapabilityContract.from_dict(contract)
         )
+        parsed = self._mint_contract_routes(parsed)
         payload = canonical_json(parsed.to_dict())
         memory_id = self.heartwood.remember(
             payload,
@@ -138,8 +141,7 @@ class Continuity:
             raise ContinuityIntegrityError(
                 "production evidence requires validated execution attestation"
             )
-        self._require_stored_binding(parsed.from_contract)
-        self._require_stored_binding(parsed.to_contract)
+        parsed = self._mint_receipt_ids(parsed)
         audit = AuditLog(self.heartwood.store)
         if not audit.verify_chain():
             raise ContinuityIntegrityError("rotation receipt audit chain invalid")
@@ -321,7 +323,7 @@ class Continuity:
         ):
             raise PermissionError("continuity access denied")
 
-    def _require_stored_binding(self, binding: ContractBinding) -> None:
+    def _resolve_stored_binding(self, binding: ContractBinding) -> ContractBinding:
         for meta in self.heartwood.store.candidate_meta(self.heartwood.tenant):
             if not self._is_contract_meta(meta):
                 continue
@@ -330,12 +332,92 @@ class Continuity:
             except ContinuityIntegrityError:
                 continue
             if (
-                contract.route_id == binding.route_id
-                and contract.schema_version == binding.schema_version
+                contract.schema_version == binding.schema_version
                 and contract.contract_hash == binding.contract_hash
             ):
-                return
+                return ContractBinding(
+                    route_id=contract.route_id,
+                    schema_version=contract.schema_version,
+                    contract_hash=contract.contract_hash,
+                )
         raise ContinuityIntegrityError("rotation receipt contract binding not found")
+
+    def _mint_contract_routes(
+        self,
+        contract: CapabilityContract,
+    ) -> CapabilityContract:
+        value = contract.to_dict()
+        value["route_id"] = self._canonical_route_id(contract.route_id)
+        for policy in value["fallback"].values():
+            policy["target_route_id"] = self._canonical_route_id(
+                policy["target_route_id"]
+            )
+        return CapabilityContract.from_dict(value)
+
+    def _mint_receipt_ids(
+        self,
+        draft: RotationReceiptDraft,
+    ) -> RotationReceiptDraft:
+        from_binding = self._resolve_stored_binding(draft.from_contract)
+        to_binding = self._resolve_stored_binding(draft.to_contract)
+        value = draft.to_dict()
+        route_aliases = {
+            draft.from_route: from_binding.route_id,
+            draft.from_contract.route_id: from_binding.route_id,
+            draft.to_route: to_binding.route_id,
+            draft.to_contract.route_id: to_binding.route_id,
+        }
+        value["receipt_id"] = self._boundary_id("rot_")
+        value["run_id"] = self._boundary_id("run_")
+        value["from_route"] = from_binding.route_id
+        value["to_route"] = to_binding.route_id
+        value["from_contract"] = from_binding.to_dict()
+        value["to_contract"] = to_binding.to_dict()
+        for case in value["cases"]:
+            case["case_id"] = self._boundary_id("case_")
+            fallback = case["fallback"]
+            if fallback["attempted"]:
+                fallback["target_route_id"] = self._issued_route_id(
+                    fallback["target_route_id"],
+                    route_aliases,
+                )
+        return RotationReceiptDraft.from_dict(value)
+
+    def _canonical_route_id(self, caller_id: str) -> str:
+        existing = self._route_aliases.get(caller_id)
+        if existing is not None:
+            return existing
+        if caller_id in self._stored_route_ids():
+            self._route_aliases[caller_id] = caller_id
+            return caller_id
+        minted = self._boundary_id("route_")
+        self._route_aliases[caller_id] = minted
+        return minted
+
+    def _issued_route_id(
+        self,
+        caller_id: str,
+        route_aliases: Mapping[str, str],
+    ) -> str:
+        resolved = route_aliases.get(caller_id) or self._route_aliases.get(caller_id)
+        if resolved is None or resolved not in set(route_aliases.values()):
+            raise ContinuityIntegrityError("fallback route binding not found")
+        return resolved
+
+    def _stored_route_ids(self) -> set[str]:
+        route_ids: set[str] = set()
+        for meta in self.heartwood.store.candidate_meta(self.heartwood.tenant):
+            if not self._is_contract_meta(meta):
+                continue
+            try:
+                route_ids.add(self._contract_from_meta(meta).route_id)
+            except ContinuityIntegrityError:
+                continue
+        return route_ids
+
+    @staticmethod
+    def _boundary_id(prefix: str) -> str:
+        return prefix + secrets.token_hex(16)
 
     def _contract_from_meta(self, meta: dict[str, Any]) -> CapabilityContract:
         content = self.heartwood._read_content_unchecked(meta["id"])
