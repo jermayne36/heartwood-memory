@@ -12,7 +12,7 @@ def test_package_and_runtime_versions_match():
     assert assert_versions_match(
         ROOT / "pyproject.toml",
         ROOT / "heartwood" / "__init__.py",
-    ) == "0.2.4"
+    ) == "0.2.5"
 
 
 def test_version_guard_rejects_runtime_drift(tmp_path):
