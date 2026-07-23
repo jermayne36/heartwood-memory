@@ -7,7 +7,7 @@ All notable changes to `heartwood-memory` are documented here.
 ### Added
 - Opt-in strict provenance enforcement with `StrictMode.OFF`, `FILTER`, and `ENFORCE`. FILTER returns fewer than `k` and records reason buckets; ENFORCE raises before any recall result or explanation is returned.
 - `heartwood strict-preflight` scans every stored row into reconciled terminal buckets, identifies unverifiable operator trust-import candidates, and can seal and activate an exact operator-approved cutover snapshot.
-- Snapshot-sealed strict cutover artifacts bind the complete current provenance payload through a length-safe canonical tuple hash, fingerprint exact signature bytes, use an operator-config SHA-256 pin, and emit derived-only `strict_exempt` markers for admitted pre-cutover rows.
+- Snapshot-sealed strict cutover artifacts bind the complete current provenance payload (`id`, `content_hash`, `source.uri`, `created_by`, and `epistemic`) through a length-safe canonical tuple hash, bind tenant separately, fingerprint exact signature bytes, use an operator-config SHA-256 pin, and emit derived-only `strict_exempt` markers for admitted pre-cutover rows.
 - Pluggable `AnchorSink` custody, a locked and `fsync`-acknowledged local JSONL sink, signed count/time/close/on-demand anchor writing, `Heartwood.verify_chain_against_anchors()`, and the fail-closed `heartwood verify-audit` receipt CLI.
 - Store-global anchors bind the exact audit sequence/hash tuple, chain and sink identities, created time, anchor/signing-key ids, and an externally pinned Ed25519 verification-root fingerprint. Receipts expose chain, sink, signature, freshness, and post-anchor open-window state separately.
 
@@ -18,7 +18,8 @@ All notable changes to `heartwood-memory` are documented here.
 - The audit module now states the non-atomic compatibility append boundary explicitly instead of implying it has the SQLite writer's concurrency guarantee.
 
 ### Governance
-- Strict legacy exemption never reads `created_at`. The existing memory-signature format still omits `created_at`; changing it in place would invalidate historical signatures, so broader versioned signed-payload coverage remains a separately reviewed migration rather than being folded into this cutover.
+- Strict mode authenticates only the five-field provenance payload named above, the stored content hash, exact signature bytes, and the manifest-bound tenant. It does not authenticate `created_at`, `classification`, role/authorization metadata such as `roles_json`, or `indexed` state. A tenant-row mutation is rejected by the separate manifest tenant binding; broader versioned signed-payload coverage remains a separately reviewed migration rather than being folded into this cutover.
+- Ordinary Ed25519 verification assumes the `principal_keys` verification-key registry (including its alias rows) in the same SQLite database is trustworthy. Strict mode does not externally pin that registry; replacing both a registry key and the matching stored signature remains outside this release's authenticated boundary.
 - The local-file sink is an out-of-database anchor, not an independent timestamp or a separate failure domain by default. It detects database truncation at or below a persisted anchor while the sink and externally pinned signing root remain outside the attacker boundary; post-anchor rows and shared database/sink compromise remain explicit limits.
 
 ## [0.2.3] - 2026-07-22

@@ -1,6 +1,7 @@
 """Strict signature mode and snapshot-sealed cutover regressions."""
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import pytest
 from heartwood import (
     Heartwood,
     LocalKmsCustodian,
+    Policy,
     Principal,
     RawKeyCustodian,
     StrictConfigurationError,
@@ -65,6 +67,8 @@ def _remember_hmac_legacy(
     tenant: str = TENANT,
     created_by: str = "agent:legacy",
     source_uri: str = "doc://legacy/source",
+    created_at: float | None = None,
+    policy: Policy | None = None,
 ) -> str:
     with monkeypatch.context() as local:
         local.setattr(provenance, "_HAVE_ED25519", False)
@@ -76,13 +80,21 @@ def _remember_hmac_legacy(
                 created_by=created_by,
                 epistemic="imported-source",
                 source={"uri": source_uri},
+                created_at=created_at,
+                policy=policy,
             )
         finally:
             db.close()
 
 
-def _prepare_cutover(path: Path, manifest: Path, monkeypatch) -> tuple[str, str, dict, dict]:
-    mem_id = _remember_hmac_legacy(path, monkeypatch)
+def _prepare_cutover(
+    path: Path,
+    manifest: Path,
+    monkeypatch,
+    *,
+    legacy_kwargs: dict | None = None,
+) -> tuple[str, str, dict, dict]:
+    mem_id = _remember_hmac_legacy(path, monkeypatch, **(legacy_kwargs or {}))
     db = _db(path, custodian=_custodian())
     try:
         report = db.strict_preflight()
@@ -300,6 +312,246 @@ def test_manifest_binds_every_mutable_signed_payload_field(
     try:
         with pytest.raises(StrictSignatureError):
             strict.recall("legacy HMAC migration", principal=_principal(), k=3)
+    finally:
+        strict.close()
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("created_at", 0.0),
+        ("classification", "public"),
+        ("roles_json", json.dumps(["forged-role"])),
+        ("indexed", 0),
+    ],
+)
+def test_manifest_does_not_bind_unsigned_time_policy_or_index_fields(
+    tmp_path,
+    monkeypatch,
+    column,
+    value,
+):
+    path = tmp_path / f"unsigned-{column}.db"
+    manifest = tmp_path / f"unsigned-{column}.json"
+    mem_id, digest, _sealed, _activated = _prepare_cutover(
+        path,
+        manifest,
+        monkeypatch,
+    )
+
+    strict = _db(
+        path,
+        custodian=_custodian(),
+        mode=StrictMode.ENFORCE,
+        legacy_exemption="manifest",
+        manifest=manifest,
+        digest=digest,
+    )
+    try:
+        before = strict.store.get_meta(mem_id)
+        assert strict._strict_cutover.match(
+            meta=before,
+            actual_content_hash=before["content_hash"],
+        )
+        strict.store.conn.execute(
+            f"UPDATE memories SET {column}=? WHERE id=?",
+            (value, mem_id),
+        )
+        strict.store.conn.commit()
+        after = strict.store.get_meta(mem_id)
+        assert after[column if column != "roles_json" else "roles"] != before[
+            column if column != "roles_json" else "roles"
+        ]
+        assert strict._strict_cutover.match(
+            meta=after,
+            actual_content_hash=after["content_hash"],
+        )
+    finally:
+        strict.close()
+
+
+def test_unsigned_classification_and_roles_can_change_who_strict_mode_returns(
+    tmp_path,
+    monkeypatch,
+):
+    path = tmp_path / "unsigned-authorization.db"
+    manifest = tmp_path / "unsigned-authorization.json"
+    mem_id, digest, _sealed, _activated = _prepare_cutover(
+        path,
+        manifest,
+        monkeypatch,
+        legacy_kwargs={
+            "policy": Policy(
+                classification="confidential",
+                roles=("vault-reader",),
+            ),
+        },
+    )
+
+    strict = _db(
+        path,
+        custodian=_custodian(),
+        mode=StrictMode.ENFORCE,
+        legacy_exemption="manifest",
+        manifest=manifest,
+        digest=digest,
+    )
+    try:
+        denied = strict.recall(
+            "legacy HMAC migration",
+            principal=_principal(),
+            k=3,
+        )
+        assert denied["results"] == []
+
+        strict.store.conn.execute(
+            "UPDATE memories SET classification=?, roles_json=? WHERE id=?",
+            ("internal", "[]", mem_id),
+        )
+        strict.store.conn.commit()
+        admitted = strict.recall(
+            "legacy HMAC migration",
+            principal=_principal(),
+            k=3,
+        )
+        assert [result["id"] for result in admitted["results"]] == [mem_id]
+        assert admitted["results"][0]["strict_exempt"] == "pre_cutover"
+    finally:
+        strict.close()
+
+
+def test_backdating_an_unknown_id_does_not_gain_a_legacy_exemption(
+    tmp_path,
+    monkeypatch,
+):
+    path = tmp_path / "backdated-unknown.db"
+    manifest = tmp_path / "backdated-unknown.json"
+    known_id, digest, _sealed, _activated = _prepare_cutover(
+        path,
+        manifest,
+        monkeypatch,
+    )
+    unknown_id = _remember_hmac_legacy(
+        path,
+        monkeypatch,
+        created_by="agent:post-cutover",
+        source_uri="doc://post-cutover/backdated",
+        created_at=0.0,
+    )
+
+    strict = _db(
+        path,
+        custodian=_custodian(),
+        mode=StrictMode.ENFORCE,
+        legacy_exemption="manifest",
+        manifest=manifest,
+        digest=digest,
+    )
+    try:
+        with pytest.raises(StrictSignatureError) as exc:
+            strict.recall(
+                "legacy HMAC migration",
+                principal=_principal(),
+                k=3,
+            )
+        assert known_id not in exc.value.ids
+        assert exc.value.ids == (unknown_id,)
+    finally:
+        strict.close()
+
+
+def test_manifest_binds_tenant_separately_from_the_signed_payload(
+    tmp_path,
+    monkeypatch,
+):
+    path = tmp_path / "tenant-row.db"
+    manifest = tmp_path / "tenant-row.json"
+    mem_id, digest, _sealed, _activated = _prepare_cutover(
+        path,
+        manifest,
+        monkeypatch,
+    )
+    strict = _db(
+        path,
+        custodian=_custodian(),
+        mode=StrictMode.ENFORCE,
+        legacy_exemption="manifest",
+        manifest=manifest,
+        digest=digest,
+    )
+    try:
+        strict.store.conn.execute(
+            "UPDATE memories SET tenant=? WHERE id=?",
+            ("tenant:changed", mem_id),
+        )
+        strict.store.conn.commit()
+        changed = strict.store.get_meta(mem_id)
+        assert not strict._strict_cutover.match(
+            meta=changed,
+            actual_content_hash=changed["content_hash"],
+        )
+    finally:
+        strict.close()
+
+
+def test_strict_mode_assumes_the_same_db_principal_keys_registry(
+    tmp_path,
+):
+    path = tmp_path / "same-db-principal-keys.db"
+    db = _db(path, custodian=_custodian())
+    try:
+        mem_id = db.remember(
+            "A replaced same-database verification key remains a trust assumption.",
+            subject="subject:key-registry",
+            created_by="agent:key-registry",
+            source={"uri": "doc://strict/key-registry"},
+        )
+        meta = db.store.get_meta(mem_id)
+        replacement_signer = provenance.Signer(
+            tenant=TENANT,
+            key_custodian=LocalKmsCustodian(
+                bytes([74]) * 32,
+                key_id="strict-test-replacement-root-v1",
+            ),
+        )
+        replacement_signature = replacement_signer.sign(
+            meta["created_by"],
+            meta["id"],
+            meta["content_hash"],
+            meta["source"]["uri"],
+            meta["created_by"],
+            meta["epistemic"],
+        )
+        _algorithm, public_text, _signature_text = replacement_signature.split(
+            ":",
+            2,
+        )
+        public_key = base64.urlsafe_b64decode(
+            public_text + ("=" * ((4 - len(public_text) % 4) % 4))
+        )
+        db.store.conn.execute(
+            "UPDATE principal_keys SET public_key=? "
+            "WHERE tenant=? AND principal_id=?",
+            (public_key, TENANT, meta["created_by"]),
+        )
+        db.store.conn.execute(
+            "UPDATE memories SET producer_sig=? WHERE id=?",
+            (replacement_signature, mem_id),
+        )
+        db.store.conn.commit()
+    finally:
+        db.close()
+
+    strict = _db(path, custodian=_custodian(), mode=StrictMode.ENFORCE)
+    try:
+        out = strict.recall(
+            "replaced same-database verification key",
+            principal=_principal(),
+            k=3,
+        )
+        assert [result["id"] for result in out["results"]] == [mem_id]
+        assert out["results"][0]["provenance"]["signature_valid"] is True
+        assert out["results"][0]["provenance"]["content_hash_match"] is True
     finally:
         strict.close()
 
