@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "heartwood-memory"
-version = "0.2.4"
+version = "0.2.5"
 description = "Governed, provenance-first agent memory for AI systems."
 readme = "README.md"
 requires-python = ">=3.11"

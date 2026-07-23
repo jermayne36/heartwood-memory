@@ -4,6 +4,8 @@ All notable changes to `heartwood-memory` are documented here.
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-07-23
+
 ### Added
 - Dependency-free `heartwood.continuity` capability-contract schemas, privileged
   `indexed=0` contract storage, and versioned signed rotation measured diffs with
