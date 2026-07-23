@@ -20,6 +20,7 @@ as needed.
 - [macOS launchd](integrations/macos-launchd.md)
 - [Markdown import](integrations/markdown-import.md)
 - [MCP quickstart](integrations/mcp-quickstart.md)
+- [VS Code + GitHub Copilot MCP](integrations/vscode-copilot.md)
 - [Warm recall](integrations/warm-recall.md)
 
 ## Security and identity

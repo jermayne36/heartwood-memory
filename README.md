@@ -138,6 +138,8 @@ Governance you can inspect and re-run at the record level:
 ## Key docs
 
 - [MCP quickstart](docs/integrations/mcp-quickstart.md)
+- [VS Code + GitHub Copilot MCP](docs/integrations/vscode-copilot.md)
+- [Rotation-continuity demo](examples/rotation-continuity/README.md)
 - [Codex local-stdio quickstart](docs/integrations/codex-quickstart.md)
 - [Onboarding guide](docs/integrations/onboarding-guide.md)
 - [Python API reference](docs/api/python-api.md)
