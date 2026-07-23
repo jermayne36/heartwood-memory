@@ -69,16 +69,24 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def build_wheel() -> list[Path]:
+def build_distributions() -> list[Path]:
     ensure_build_module()
     DIST.mkdir(exist_ok=True)
-    for path in DIST.glob("heartwood_memory-*.whl"):
-        path.unlink()
-    subprocess.check_call([sys.executable, "-m", "build", "--wheel", "--outdir", str(DIST)], cwd=ROOT)
-    return sorted(DIST.glob("heartwood_memory-*.whl"))
+    for pattern in ("heartwood_memory-*.whl", "heartwood_memory-*.tar.gz"):
+        for path in DIST.glob(pattern):
+            path.unlink()
+    subprocess.check_call(
+        [sys.executable, "-m", "build", "--wheel", "--sdist", "--outdir", str(DIST)],
+        cwd=ROOT,
+    )
+    wheels = sorted(DIST.glob("heartwood_memory-*.whl"))
+    sdists = sorted(DIST.glob("heartwood_memory-*.tar.gz"))
+    if not wheels or not sdists:
+        raise RuntimeError("release build did not produce both a wheel and an sdist")
+    return [*wheels, *sdists]
 
 
-def write_manifest(wheels: list[Path]) -> Path:
+def write_manifest(artifacts: list[Path]) -> Path:
     private_key, key_source = signing_key()
     public_key = private_key.public_key().public_bytes(
         encoding=serialization.Encoding.Raw,
@@ -90,7 +98,7 @@ def write_manifest(wheels: list[Path]) -> Path:
             "sha256": sha256(path),
             "bytes": path.stat().st_size,
         }
-        for path in wheels
+        for path in artifacts
     ]
     payload = {
         "schema": "heartwood.release.v1",
@@ -137,11 +145,11 @@ def verify_manifest(path: Path) -> None:
 def main() -> None:
     version = assert_versions_match(ROOT / "pyproject.toml", ROOT / "heartwood" / "__init__.py")
     print(f"Version guard passed: {version}")
-    wheels = build_wheel()
-    manifest = write_manifest(wheels)
+    artifacts = build_distributions()
+    manifest = write_manifest(artifacts)
     verify_manifest(manifest)
     print("Built release artifacts:")
-    for path in wheels:
+    for path in artifacts:
         print(f"- {path}")
     print(f"- {manifest}")
 

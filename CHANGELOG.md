@@ -4,6 +4,9 @@ All notable changes to `heartwood-memory` are documented here.
 
 ## [Unreleased]
 
+### Changed
+- The Ed25519 release manifest now covers both the wheel and source distribution, with a SHA-256 receipt for each published artifact.
+
 ## [0.2.3] - 2026-07-22
 
 ### Added
