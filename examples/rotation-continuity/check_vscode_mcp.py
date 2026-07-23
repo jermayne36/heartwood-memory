@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -26,15 +25,12 @@ async def run_check(args: argparse.Namespace) -> dict[str, Any]:
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
 
-    env = os.environ.copy()
-    env.update(
-        {
-            "PYTHONPATH": str(ROOT),
-            "HEARTWOOD_DB_PATH": str(args.db_path.expanduser().resolve()),
-            "HEARTWOOD_TENANT": "tenant:rotation-continuity-demo",
-            "HEARTWOOD_MCP_ALLOWED_TOOLS": "recall,explain_recall,health",
-        }
-    )
+    env = {
+        "PYTHONPATH": str(ROOT),
+        "HEARTWOOD_DB_PATH": str(args.db_path.expanduser().resolve()),
+        "HEARTWOOD_TENANT": "tenant:rotation-continuity-demo",
+        "HEARTWOOD_MCP_ALLOWED_TOOLS": "recall,explain_recall,health",
+    }
     params = StdioServerParameters(
         command=str(Path(args.python).expanduser().resolve()),
         args=[str(ROOT / "examples" / "rotation-continuity" / "mcp_server.py")],
@@ -71,6 +67,7 @@ async def run_check(args: argparse.Namespace) -> dict[str, Any]:
         "transport": "stdio",
         "command": str(Path(args.python).expanduser().resolve()),
         "args": [str(ROOT / "examples" / "rotation-continuity" / "mcp_server.py")],
+        "environment_keys": sorted(env),
         "server_name": initialized.serverInfo.name,
         "server_version": initialized.serverInfo.version,
         "tools": tools,

@@ -17,17 +17,19 @@ product.
 |---|---|---|---|
 | A — GPT class | `codex` | `gpt-5.6-sol` | disclosed deterministic stub |
 | B — Claude class | `claude` | `sonnet` | disclosed deterministic stub |
-| C — open weights | `ollama` | local Qwen GGUF named by `--open-weights-model` | disclosed deterministic stub |
+| C — open weights | Ollama loopback API | local Qwen GGUF named by `--open-weights-model` | disclosed deterministic stub |
 
 Route A receives the synthetic Project Juniper scenario; after the store is
-seeded, routes B and C also receive policy-authorized recall context. The live
-provider processes are not an isolation boundary in this release: the Codex
-route retains read-only shell capability, and provider CLIs inherit the
-operator's ambient environment. Run the current harness only with synthetic
-data from a reviewed checkout. Existing local CLI authentication is reused. The
-harness does not intentionally place provider credentials in prompts or persist
-them, but it does not prevent a launched provider process from reading its
-inherited environment.
+seeded, routes B and C also receive policy-authorized recall context. The Codex
+and Claude subprocesses use replacement environments containing only
+route-specific authentication and operation variables, plus a synthetic home
+and temporary working directory. Codex disables shell, exec, browser, app,
+plugin, MCP, and multi-agent features; Claude receives an empty tool list. The
+Ollama route calls only its loopback structured-output API with temperature zero
+and no tools. These controls minimize tools and ambient environment; they are
+not an operating-system process sandbox. Provider processes still run under the
+operator account and read their own local authentication/config paths. Use only
+synthetic data from a reviewed checkout.
 
 ## Run it
 
@@ -53,6 +55,7 @@ The output directory contains:
 - `heartwood-demo.db` — the dedicated throwaway store;
 - `receipts/*.json` — `explain_recall` receipts before and after both swaps;
 - `session.json` — route execution and continuity assertions;
+- `route-status.json` — live/stub status, environment-key names, and tool boundary;
 - `audit-chain.json` — every audit event and final chain verification;
 - `transcript.md` — the five-minute talk track and receipts.
 
@@ -72,8 +75,10 @@ adapter. VS Code prompts for:
 
 Start the server from **MCP: List Servers**, review the command, and approve the
 workspace server trust prompt. Then enable the Heartwood `recall`,
-`explain_recall`, and `health` tools in agent chat. See the
-(guide forthcoming).
+`explain_recall`, and `health` tools in agent chat. The allowlist is not a
+process sandbox; use a reviewed checkout and synthetic data unless an
+administrator adds validated process restrictions. See the
+[VS Code + Copilot guide](../../docs/integrations/vscode-copilot.md).
 
 Before opening VS Code, exercise the exact stdio command and read-only tool set:
 
@@ -106,8 +111,11 @@ each run.
 
 ## Security boundary
 
-Read (guide forthcoming) before using the demo with a customer.
-Use synthetic data only. Heartwood is managed-key and decrypts in the local
-server to serve recall. Signed provenance is re-verified and surfaced rather
-than enforced as a hard read failure today. The audit chain detects edits or
-dropped retained rows; tail truncation still needs an external anchor.
+Read the [administrator security brief](ADMIN-SECURITY.md) before using the demo
+with a customer. Use synthetic data only. Heartwood is managed-key and decrypts
+in the local server to serve recall. Signed provenance is re-verified and
+surfaced rather than enforced as a hard read failure today; current signatures
+do not cover authorization metadata such as classification or roles. The audit
+verifier detects changes to the hash-bound event body or timestamp and a dropped
+interior row. Loss after the latest separately protected anchor remains outside
+detection.

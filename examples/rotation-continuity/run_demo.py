@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import secrets
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -42,6 +44,7 @@ SCENARIO = (
     "security approval exists; its stable token is security_approval_required."
 )
 QUERY = "Project Juniper release decision security approval region"
+NEGATIVE_CONTROL_ENV_NAME = "HEARTWOOD_ROTATION_SENTINEL"
 # "after" means after swapping to a route; "before" means before leaving it.
 CHECKPOINTS = (
     ("route-a-before-swap", "route-a"),
@@ -107,6 +110,17 @@ def main() -> int:
     receipts_dir = output_dir / "receipts"
     receipts_dir.mkdir()
     db_path = output_dir / "heartwood-demo.db"
+    boundary_temp = tempfile.TemporaryDirectory(
+        prefix="heartwood-rotation-negative-control-"
+    )
+    sentinel_file = Path(boundary_temp.name) / "readable-sentinel.txt"
+    sentinel_values = (
+        f"HW_ENV_{secrets.token_hex(24)}",
+        f"HW_FILE_{secrets.token_hex(24)}",
+    )
+    sentinel_file.write_text(sentinel_values[1], encoding="utf-8")
+    previous_sentinel = os.environ.get(NEGATIVE_CONTROL_ENV_NAME)
+    os.environ[NEGATIVE_CONTROL_ENV_NAME] = sentinel_values[0]
 
     db = Heartwood(
         path=db_path,
@@ -134,6 +148,7 @@ def main() -> int:
             ),
             mode=args.route_mode,
             timeout_seconds=args.route_timeout_seconds,
+            forbidden_values=sentinel_values,
         )
         route_results.append(route_a)
         _append_route_event(
@@ -199,11 +214,12 @@ def main() -> int:
                     specs[1],
                     decision_prompt(
                         route_id=specs[1].route_id,
-                        scenario=SCENARIO,
+                        scenario=None,
                         recalled_context=receipt["authorized"]["contents"],
                     ),
                     mode=args.route_mode,
                     timeout_seconds=args.route_timeout_seconds,
+                    forbidden_values=sentinel_values,
                 )
                 route_results.append(route_b)
             elif checkpoint_name == "route-c-after-swap":
@@ -211,14 +227,21 @@ def main() -> int:
                     specs[2],
                     decision_prompt(
                         route_id=specs[2].route_id,
-                        scenario=SCENARIO,
+                        scenario=None,
                         recalled_context=receipt["authorized"]["contents"],
                     ),
                     mode=args.route_mode,
                     timeout_seconds=args.route_timeout_seconds,
+                    forbidden_values=sentinel_values,
                 )
                 route_results.append(route_c)
 
+        route_status = _route_status_receipt(args, route_results)
+        _assert_sentinels_absent(
+            sentinel_values,
+            json.dumps(route_status, sort_keys=True),
+        )
+        _write_json(output_dir / "route-status.json", route_status)
         summary = _build_summary(
             args=args,
             output_dir=output_dir,
@@ -228,15 +251,46 @@ def main() -> int:
             checkpoint_receipts=checkpoint_receipts,
             reference_fingerprint=reference_fingerprint or "",
         )
+        if any(
+            NEGATIVE_CONTROL_ENV_NAME in result.environment_keys
+            for result in route_results
+        ):
+            raise AssertionError("ambient sentinel variable entered a route environment")
+        if not sentinel_file.is_file() or not os.access(sentinel_file, os.R_OK):
+            raise AssertionError("negative-control sentinel file was not readable")
+        if not all(result.provider_streams_clear for result in route_results):
+            raise AssertionError("provider stream negative control failed")
+        summary["negative_controls"] = {
+            "ambient_environment_sentinel_excluded": True,
+            "readable_sentinel_file_created": True,
+            "provider_streams_clear": True,
+            "persisted_artifacts_clear": True,
+        }
+        summary["route_status_receipt"] = "route-status.json"
+        transcript = _render_transcript(summary)
+        console = _console_summary(summary)
+        _assert_sentinels_absent(
+            sentinel_values,
+            json.dumps(summary, sort_keys=True),
+            json.dumps(summary["audit_chain"], sort_keys=True),
+            json.dumps(route_status, sort_keys=True),
+            transcript,
+            console,
+        )
         _write_json(output_dir / "session.json", summary)
         _write_json(output_dir / "audit-chain.json", summary["audit_chain"])
         (output_dir / "transcript.md").write_text(
-            _render_transcript(summary),
+            transcript,
             encoding="utf-8",
         )
-        print(_console_summary(summary))
+        print(console)
         return 0
     finally:
+        if previous_sentinel is None:
+            os.environ.pop(NEGATIVE_CONTROL_ENV_NAME, None)
+        else:
+            os.environ[NEGATIVE_CONTROL_ENV_NAME] = previous_sentinel
+        boundary_temp.cleanup()
         api.close()
 
 
@@ -248,6 +302,45 @@ def _prepare_output_dir(requested: Path | None) -> Path:
     if any(output_dir.iterdir()):
         raise SystemExit(f"output directory must be empty: {output_dir}")
     return output_dir
+
+
+def _route_status_receipt(
+    args: argparse.Namespace,
+    route_results: list[RouteResult],
+) -> dict[str, Any]:
+    live_count = sum(result.execution == "live" for result in route_results)
+    return {
+        "status": "PASS" if live_count >= args.require_live else "FAIL",
+        "required_live_routes": args.require_live,
+        "observed_live_routes": live_count,
+        "routes": [
+            {
+                "route_id": result.route_id,
+                "provider": result.provider,
+                "model": result.model,
+                "execution": result.execution,
+                "environment_keys": list(result.environment_keys),
+                "tool_boundary": result.tool_boundary,
+                "provider_streams_clear": result.provider_streams_clear,
+                "fallback_reason": result.fallback_reason,
+            }
+            for result in route_results
+        ],
+    }
+
+
+def _assert_sentinels_absent(
+    sentinel_values: tuple[str, ...],
+    *artifacts: str,
+) -> None:
+    if any(
+        value and value in artifact
+        for value in sentinel_values
+        for artifact in artifacts
+    ):
+        raise AssertionError(
+            "negative-control sentinel reached a persisted or displayed artifact"
+        )
 
 
 def _write_route_a_state(db: Heartwood, route: RouteResult) -> None:
@@ -440,21 +533,36 @@ def _stable_explain(explanation: dict[str, Any]) -> dict[str, Any]:
 
 def _audit_rows(db: Heartwood) -> list[dict[str, Any]]:
     rows = db.store.conn.execute(
-        "SELECT seq, ts, principal, action, target, prev_hash, row_hash "
+        "SELECT seq, ts, tenant, principal, action, target, body, prev_hash, row_hash "
         "FROM audit_log ORDER BY seq"
     ).fetchall()
-    return [
-        {
-            "seq": row["seq"],
-            "ts": row["ts"],
-            "principal": row["principal"],
-            "action": row["action"],
-            "target": row["target"],
-            "prev_hash": row["prev_hash"],
-            "row_hash": row["row_hash"],
-        }
-        for row in rows
-    ]
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        body = json.loads(row["body"])
+        metadata_matches = (
+            body.get("tenant") == row["tenant"]
+            and body.get("principal") == row["principal"]
+            and body.get("action") == row["action"]
+            and body.get("target") == row["target"]
+        )
+        if not metadata_matches:
+            raise AssertionError(
+                "displayed audit metadata diverged from the hash-bound event body"
+            )
+        result.append(
+            {
+                "seq": row["seq"],
+                "ts": row["ts"],
+                "tenant": row["tenant"],
+                "principal": row["principal"],
+                "action": row["action"],
+                "target": row["target"],
+                "metadata_matches_hash_bound_body": True,
+                "prev_hash": row["prev_hash"],
+                "row_hash": row["row_hash"],
+            }
+        )
+    return result
 
 
 def _build_summary(
@@ -482,8 +590,15 @@ def _build_summary(
     audit_rows = _audit_rows(db)
     if db.verify_audit() is not True:
         raise AssertionError("final audit chain verification failed")
+    if any(row["tenant"] != TENANT for row in audit_rows):
+        raise AssertionError("more than one tenant entered the demo audit chain")
     if any(row["principal"] != AGENT_ID for row in audit_rows):
         raise AssertionError("more than one agent principal entered the demo audit chain")
+    if not all(
+        row["metadata_matches_hash_bound_body"] is True
+        for row in audit_rows
+    ):
+        raise AssertionError("displayed audit metadata did not match hash-bound bodies")
     linkage_ok = all(
         row["prev_hash"] == ("genesis" if index == 0 else audit_rows[index - 1]["row_hash"])
         for index, row in enumerate(audit_rows)
@@ -561,6 +676,7 @@ def _build_summary(
         "audit_chain": {
             "verify_audit": True,
             "linkage_ok": linkage_ok,
+            "displayed_metadata_matches_hash_bound_body": True,
             "event_count": len(audit_rows),
             "genesis_prev_hash": audit_rows[0]["prev_hash"],
             "head_hash": audit_rows[-1]["row_hash"],
@@ -605,6 +721,29 @@ def _render_transcript(summary: dict[str, Any]) -> str:
         if route["fallback_reason"]:
             lines.append(f"\nStub disclosure for `{route['route_id']}`: {route['fallback_reason']}\n")
 
+    lines.extend(
+        [
+            "",
+            "## Route boundary receipt",
+            "",
+            "| Route | Environment keys only | Tool boundary | Provider streams clear |",
+            "|---|---|---|---|",
+        ]
+    )
+    for route in summary["routes"]:
+        environment_keys = ",".join(route["environment_keys"]) or "none"
+        lines.append(
+            f"| {route['route_id']} | `{environment_keys}` | "
+            f"{route['tool_boundary']} | {route['provider_streams_clear']} |"
+        )
+    lines.extend(
+        [
+            "",
+            "Negative controls: ambient sentinel excluded; readable sentinel file "
+            "not observed; provider streams and persisted artifacts clear.",
+        ]
+    )
+
     lines.extend(["", "## Explain-recall receipts", ""])
     for checkpoint in summary["continuity"]["checkpoints"]:
         authorized = checkpoint["authorized"]
@@ -646,19 +785,24 @@ def _render_transcript(summary: dict[str, Any]) -> str:
             "",
             f"- `verify_audit={audit['verify_audit']}`",
             f"- `prev_hash_linkage={audit['linkage_ok']}`",
+            (
+                "- `displayed_metadata_matches_hash_bound_body="
+                f"{audit['displayed_metadata_matches_hash_bound_body']}`"
+            ),
             f"- `event_count={audit['event_count']}`",
             f"- `genesis_prev_hash={audit['genesis_prev_hash']}`",
             f"- `head_hash={audit['head_hash']}`",
             "",
-            "| Seq | Principal | Action | Target | Previous hash | Row hash |",
-            "|---:|---|---|---|---|---|",
+            "| Seq | Tenant | Principal | Action | Target | Metadata/body | Previous hash | Row hash |",
+            "|---:|---|---|---|---|---|---|---|",
         ]
     )
     for event in audit["events"]:
         lines.append(
-            f"| {event['seq']} | {event['principal']} | {event['action']} | "
-            f"{event['target']} | `{event['prev_hash'][:16]}` | "
-            f"`{event['row_hash'][:16]}` |"
+            f"| {event['seq']} | {event['tenant']} | {event['principal']} | "
+            f"{event['action']} | {event['target']} | "
+            f"{event['metadata_matches_hash_bound_body']} | "
+            f"`{event['prev_hash'][:16]}` | `{event['row_hash'][:16]}` |"
         )
 
     lines.extend(
@@ -690,9 +834,12 @@ def _console_summary(summary: dict[str, Any]) -> str:
             "POLICY_DENIAL_IDENTICAL=true",
             "EXPLAIN_RECEIPTS=4",
             f"AUDIT_CHAIN_VERIFY={str(summary['audit_chain']['verify_audit']).lower()}",
+            "AUDIT_METADATA_MATCH=true",
+            "NEGATIVE_CONTROLS=PASS",
             f"AUDIT_EVENTS={summary['audit_chain']['event_count']}",
             f"OUTPUT_DIR={summary['scope']['output_dir']}",
             f"TRANSCRIPT={Path(summary['scope']['output_dir']) / 'transcript.md'}",
+            f"ROUTE_STATUS={Path(summary['scope']['output_dir']) / 'route-status.json'}",
         ]
     )
 
