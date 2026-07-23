@@ -19,10 +19,15 @@ product.
 | B — Claude class | `claude` | `sonnet` | disclosed deterministic stub |
 | C — open weights | `ollama` | local Qwen GGUF named by `--open-weights-model` | disclosed deterministic stub |
 
-The provider CLIs receive only the synthetic Project Juniper scenario and
-policy-authorized recall context. They receive no Heartwood database access and
-no tools. Existing CLI authentication is reused; the demo neither creates nor
-stores credentials and never signs up for a provider.
+Route A receives the synthetic Project Juniper scenario; after the store is
+seeded, routes B and C also receive policy-authorized recall context. The live
+provider processes are not an isolation boundary in this release: the Codex
+route retains read-only shell capability, and provider CLIs inherit the
+operator's ambient environment. Run the current harness only with synthetic
+data from a reviewed checkout. Existing local CLI authentication is reused. The
+harness does not intentionally place provider credentials in prompts or persist
+them, but it does not prevent a launched provider process from reading its
+inherited environment.
 
 ## Run it
 
