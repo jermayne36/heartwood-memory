@@ -61,10 +61,12 @@ def test_prototype_end_to_end_receipt_is_signed_and_audit_bound():
         receipt = SignedRotationReceipt.from_dict(receipt_dict)
 
         assert receipt.draft.evidence_mode.value == "prototype"
+        assert baseline_dict["prior_baseline"] == {"is_genesis": True}
         assert receipt.draft.prior_baseline.receipt_id == baseline_dict["receipt_id"]
         assert (
             receipt.draft.prior_baseline.receipt_hash == baseline_dict["receipt_hash"]
         )
+        assert receipt.draft.prior_baseline.audit_seq == baseline_dict["audit_seq"]
 
         reopened = prototype._new_heartwood(artifacts.database_path)
         try:
@@ -75,6 +77,7 @@ def test_prototype_end_to_end_receipt_is_signed_and_audit_bound():
         assert verification["signature_valid"] is True
         assert verification["audit_event_valid"] is True
         assert verification["audit_chain_valid"] is True
+        assert verification["baseline_valid"] is True
 
 
 def test_sentinel_environment_and_file_negative_controls_pass():

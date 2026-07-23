@@ -19,8 +19,10 @@ from ..provenance import verify_meta
 from .schema import (
     RECEIPT_SIGNATURE_DOMAIN,
     RECEIPT_SIGNING_VERSION,
+    BaselineBinding,
     CapabilityContract,
     ContractBinding,
+    GenesisMarker,
     RotationReceiptDraft,
     SignedRotationReceipt,
     canonical_bytes,
@@ -133,6 +135,15 @@ class Continuity:
         )
         self._require_stored_binding(parsed.from_contract)
         self._require_stored_binding(parsed.to_contract)
+        audit = AuditLog(self.heartwood.store)
+        if not audit.verify_chain():
+            raise ContinuityIntegrityError("rotation receipt audit chain invalid")
+        lineage_hash = self._route_lineage_hash(parsed)
+        if not self._baseline_valid(
+            parsed.prior_baseline,
+            lineage_hash=lineage_hash,
+        ):
+            raise ContinuityIntegrityError("rotation receipt prior baseline invalid")
 
         # Registration may persist the public key, so it must complete before
         # append_bound opens the audit write transaction.
@@ -140,6 +151,13 @@ class Continuity:
         receipt_box: dict[str, SignedRotationReceipt] = {}
 
         def build_detail(audit_seq: int) -> dict[str, str]:
+            if (
+                isinstance(parsed.prior_baseline, BaselineBinding)
+                and parsed.prior_baseline.audit_seq >= audit_seq
+            ):
+                raise ContinuityIntegrityError(
+                    "rotation receipt prior baseline ordering invalid"
+                )
             unsigned_payload = {
                 **parsed.to_dict(),
                 "signing_version": RECEIPT_SIGNING_VERSION,
@@ -167,6 +185,7 @@ class Continuity:
             receipt_box["receipt"] = receipt
             return {
                 "receipt_hash": receipt.receipt_hash,
+                "lineage_hash": lineage_hash,
                 "status": receipt.draft.evidence_mode.value,
             }
 
@@ -186,7 +205,7 @@ class Continuity:
         self,
         receipt: SignedRotationReceipt | Mapping[str, Any],
     ) -> dict[str, Any]:
-        """Verify the measured diff signature, audit binding, and audit chain."""
+        """Verify signature, current audit binding/chain, and prior baseline."""
         try:
             parsed = (
                 receipt
@@ -199,6 +218,7 @@ class Continuity:
                 "signature_valid": False,
                 "audit_event_valid": False,
                 "audit_chain_valid": False,
+                "baseline_valid": False,
             }
 
         signature_valid = self.heartwood.signer.verify_detached(
@@ -210,14 +230,81 @@ class Continuity:
         row = self.heartwood.store.audit_row(parsed.audit_seq)
         audit_event_valid = self._audit_row_matches_receipt(row, parsed)
         audit_chain_valid = AuditLog(self.heartwood.store).verify_chain()
+        baseline_valid = self._baseline_valid(
+            parsed.draft.prior_baseline,
+            lineage_hash=self._route_lineage_hash(parsed.draft),
+            current_audit_seq=parsed.audit_seq,
+        )
         return {
-            "ok": signature_valid and audit_event_valid and audit_chain_valid,
+            "ok": (
+                signature_valid
+                and audit_event_valid
+                and audit_chain_valid
+                and baseline_valid
+            ),
             "signature_valid": signature_valid,
             "audit_event_valid": audit_event_valid,
             "audit_chain_valid": audit_chain_valid,
+            "baseline_valid": baseline_valid,
             "receipt_id": parsed.draft.receipt_id,
             "receipt_hash": parsed.receipt_hash,
         }
+
+    def _baseline_valid(
+        self,
+        baseline: BaselineBinding | GenesisMarker,
+        *,
+        lineage_hash: str,
+        current_audit_seq: int | None = None,
+    ) -> bool:
+        if isinstance(baseline, GenesisMarker):
+            return not self._earlier_lineage_receipt_exists(
+                lineage_hash,
+                before_seq=current_audit_seq,
+            )
+        if current_audit_seq is not None and baseline.audit_seq >= current_audit_seq:
+            return False
+        row = self.heartwood.store.audit_row(baseline.audit_seq)
+        if row is None:
+            return False
+        try:
+            body = json.loads(row["body"])
+        except (TypeError, json.JSONDecodeError):
+            return False
+        return (
+            row["tenant"] == self.heartwood.tenant
+            and row["action"] == ROTATION_RECEIPT_AUDIT_ACTION
+            and row["target"] == baseline.receipt_id
+            and body.get("detail", {}).get("receipt_hash") == baseline.receipt_hash
+        )
+
+    def _earlier_lineage_receipt_exists(
+        self,
+        lineage_hash: str,
+        *,
+        before_seq: int | None,
+    ) -> bool:
+        for row in self.heartwood.store.iter_audit():
+            if before_seq is not None and row["seq"] >= before_seq:
+                continue
+            if row["action"] != ROTATION_RECEIPT_AUDIT_ACTION:
+                continue
+            try:
+                detail = json.loads(row["body"]).get("detail", {})
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if detail.get("lineage_hash") == lineage_hash:
+                return True
+        return False
+
+    @staticmethod
+    def _route_lineage_hash(draft: RotationReceiptDraft) -> str:
+        return content_hash(
+            {
+                "from_route": draft.from_route,
+                "to_route": draft.to_route,
+            }
+        )
 
     def _require_admin(self, principal: Principal) -> None:
         if not isinstance(principal, Principal):
@@ -284,6 +371,7 @@ class Continuity:
             return False
         expected_detail = {
             "receipt_hash": receipt.receipt_hash,
+            "lineage_hash": self._route_lineage_hash(receipt.draft),
             "status": receipt.draft.evidence_mode.value,
         }
         return (

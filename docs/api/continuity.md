@@ -43,13 +43,15 @@ A signed receipt binds:
 - both route ids and both capability-contract hashes/schema versions;
 - the eval-suite id, hash, and version;
 - the run id;
-- the prior signed baseline receipt id and hash;
+- either an explicit signed genesis marker or the prior receipt id, hash, and
+  exact audit sequence;
 - every opaque case id, enum outcome, bounded delta, and observed fallback;
 - the machine-readable `production` or `prototype` evidence mode;
 - the exact Heartwood audit sequence.
 
 The general audit event contains only the receipt id as its target plus
-`receipt_hash` and the minimal evidence-mode status. The rich receipt body is
+`receipt_hash`, a derived route-lineage hash used to reject duplicate genesis
+receipts, and the minimal evidence-mode status. The rich receipt body is
 returned to the caller and is not copied into the audit log or recall corpus.
 
 ## Canonical signing and verification root
@@ -58,6 +60,10 @@ Receipt signing version
 `heartwood.continuity.rotation-receipt.v1` uses canonical sorted JSON and an
 explicit domain separator. The existing `Signer` signs the canonical receipt
 body; the existing `AuditLog` binds it to the exact audit sequence.
+`verify_rotation_receipt()` returns `ok=true` only when the detached signature,
+current audit event, complete audit chain, and prior-baseline or genesis
+binding all verify. Its `baseline_valid` field reports that last check
+explicitly.
 
 Verification assumes the principal's registered public key in Heartwood's
 verification-key registry is trusted. That registry is in the mutable

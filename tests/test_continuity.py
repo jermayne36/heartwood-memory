@@ -26,6 +26,7 @@ from heartwood.continuity import (  # noqa: E402
     ContractBinding,
     ErrorCategory,
     EvalSuiteBinding,
+    GenesisMarker,
     RotationReceiptDraft,
     SignedRotationReceipt,
     content_hash,
@@ -42,6 +43,7 @@ CASE_B = "case_bbbbbbbbbbbbbbbb"
 SUITE_ID = "suite_aaaaaaaaaaaaaaaa"
 RUN_ID = "run_aaaaaaaaaaaaaaaa"
 RECEIPT_ID = "rot_aaaaaaaaaaaaaaaa"
+RECEIPT_ID_2 = "rot_cccccccccccccccc"
 BASELINE_ID = "rot_bbbbbbbbbbbbbbbb"
 BASELINE_HASH = "sha256:" + "b" * 64
 EVAL_HASH = "sha256:" + "e" * 64
@@ -107,10 +109,12 @@ def _draft_dict(
     to_contract: CapabilityContract,
     *,
     evidence_mode: str = "prototype",
+    receipt_id: str = RECEIPT_ID,
+    prior_baseline: dict | None = None,
 ) -> dict:
     return {
         "schema_version": RECEIPT_SCHEMA_VERSION,
-        "receipt_id": RECEIPT_ID,
+        "receipt_id": receipt_id,
         "evidence_mode": evidence_mode,
         "from_route": from_contract.route_id,
         "to_route": to_contract.route_id,
@@ -130,10 +134,7 @@ def _draft_dict(
             "eval_suite_hash": EVAL_HASH,
         },
         "run_id": RUN_ID,
-        "prior_baseline": {
-            "receipt_id": BASELINE_ID,
-            "receipt_hash": BASELINE_HASH,
-        },
+        "prior_baseline": prior_baseline or {"is_genesis": True},
         "ts": "2026-07-23T17:00:00Z",
         "cases": [
             {
@@ -181,6 +182,14 @@ def _seed_contracts(
     continuity.store_capability_contract(from_contract, principal=_admin())
     continuity.store_capability_contract(to_contract, principal=_admin())
     return continuity, from_contract, to_contract
+
+
+def _baseline_binding(receipt: SignedRotationReceipt) -> dict:
+    return {
+        "receipt_id": receipt.draft.receipt_id,
+        "receipt_hash": receipt.receipt_hash,
+        "audit_seq": receipt.audit_seq,
+    }
 
 
 def test_closed_schema_rejects_unknown_fields():
@@ -389,10 +398,7 @@ def test_receipt_binds_contract_eval_run_baseline_fallback_signature_and_audit()
             schema_version="3",
             eval_suite_hash=EVAL_HASH,
         )
-        assert receipt.draft.prior_baseline == BaselineBinding(
-            receipt_id=BASELINE_ID,
-            receipt_hash=BASELINE_HASH,
-        )
+        assert receipt.draft.prior_baseline == GenesisMarker(is_genesis=True)
         assert receipt.draft.run_id == RUN_ID
         assert receipt.draft.cases[1].fallback.exercised is True
 
@@ -402,6 +408,7 @@ def test_receipt_binds_contract_eval_run_baseline_fallback_signature_and_audit()
             "signature_valid": True,
             "audit_event_valid": True,
             "audit_chain_valid": True,
+            "baseline_valid": True,
             "receipt_id": RECEIPT_ID,
             "receipt_hash": receipt.receipt_hash,
         }
@@ -411,9 +418,19 @@ def test_receipt_binds_contract_eval_run_baseline_fallback_signature_and_audit()
         assert audit_body["target"] == RECEIPT_ID
         assert audit_body["detail"] == {
             "receipt_hash": receipt.receipt_hash,
+            "lineage_hash": content_hash(
+                {
+                    "from_route": from_contract.route_id,
+                    "to_route": to_contract.route_id,
+                }
+            ),
             "status": "prototype",
         }
-        assert set(audit_body["detail"]) == {"receipt_hash", "status"}
+        assert set(audit_body["detail"]) == {
+            "receipt_hash",
+            "lineage_hash",
+            "status",
+        }
         assert from_contract.route_id not in audit_row["body"]
         assert to_contract.route_id not in audit_row["body"]
         assert CASE_A not in audit_row["body"]
@@ -464,5 +481,129 @@ def test_receipt_hash_is_over_the_versioned_audit_bound_unsigned_payload():
         assert receipt.receipt_hash == content_hash(receipt.unsigned_payload())
         assert receipt.signing_version.endswith(".v1")
         assert receipt.audit_seq > 0
+    finally:
+        db.close()
+
+
+def test_receipt_rejects_unresolvable_prior_baseline():
+    db = _db()
+    continuity, from_contract, to_contract = _seed_contracts(db)
+    try:
+        missing = {
+            "receipt_id": BASELINE_ID,
+            "receipt_hash": BASELINE_HASH,
+            "audit_seq": 9_999_999,
+        }
+        with pytest.raises(
+            ContinuityIntegrityError,
+            match="prior baseline invalid",
+        ):
+            continuity.issue_rotation_receipt(
+                _draft_dict(
+                    from_contract,
+                    to_contract,
+                    prior_baseline=missing,
+                ),
+                principal=_admin(),
+            )
+
+        genesis = continuity.issue_rotation_receipt(
+            _draft_dict(from_contract, to_contract),
+            principal=_admin(),
+        )
+        forged = copy.deepcopy(genesis.to_dict())
+        forged["prior_baseline"] = missing
+        unsigned = {
+            key: value
+            for key, value in forged.items()
+            if key not in {"receipt_hash", "signature"}
+        }
+        forged["receipt_hash"] = content_hash(unsigned)
+        verification = continuity.verify_rotation_receipt(forged)
+        assert verification["ok"] is False
+        assert verification["baseline_valid"] is False
+    finally:
+        db.close()
+
+
+def test_prior_baseline_verified_against_audit_chain():
+    db = _db()
+    continuity, from_contract, to_contract = _seed_contracts(db)
+    try:
+        baseline = continuity.issue_rotation_receipt(
+            _draft_dict(from_contract, to_contract),
+            principal=_admin(),
+        )
+        receipt = continuity.issue_rotation_receipt(
+            _draft_dict(
+                from_contract,
+                to_contract,
+                receipt_id=RECEIPT_ID_2,
+                prior_baseline=_baseline_binding(baseline),
+            ),
+            principal=_admin(),
+        )
+        verification = continuity.verify_rotation_receipt(receipt)
+        assert verification["ok"] is True
+        assert verification["baseline_valid"] is True
+        assert receipt.draft.prior_baseline == BaselineBinding(
+            receipt_id=baseline.draft.receipt_id,
+            receipt_hash=baseline.receipt_hash,
+            audit_seq=baseline.audit_seq,
+        )
+    finally:
+        db.close()
+
+
+def test_explicit_genesis_issues_and_verifies_and_second_genesis_rejected():
+    db = _db()
+    continuity, from_contract, to_contract = _seed_contracts(db)
+    try:
+        genesis = continuity.issue_rotation_receipt(
+            _draft_dict(from_contract, to_contract),
+            principal=_admin(),
+        )
+        assert genesis.draft.prior_baseline == GenesisMarker(is_genesis=True)
+        assert continuity.verify_rotation_receipt(genesis)["ok"] is True
+
+        with pytest.raises(
+            ContinuityIntegrityError,
+            match="prior baseline invalid",
+        ):
+            continuity.issue_rotation_receipt(
+                _draft_dict(
+                    from_contract,
+                    to_contract,
+                    receipt_id=RECEIPT_ID_2,
+                ),
+                principal=_admin(),
+            )
+    finally:
+        db.close()
+
+
+def test_prior_baseline_ordering_enforced():
+    db = _db()
+    continuity, from_contract, to_contract = _seed_contracts(db)
+    try:
+        genesis = continuity.issue_rotation_receipt(
+            _draft_dict(from_contract, to_contract),
+            principal=_admin(),
+        )
+        forged = copy.deepcopy(genesis.to_dict())
+        forged["prior_baseline"] = {
+            "receipt_id": genesis.draft.receipt_id,
+            "receipt_hash": genesis.receipt_hash,
+            "audit_seq": genesis.audit_seq,
+        }
+        unsigned = {
+            key: value
+            for key, value in forged.items()
+            if key not in {"receipt_hash", "signature"}
+        }
+        forged["receipt_hash"] = content_hash(unsigned)
+        verification = continuity.verify_rotation_receipt(forged)
+        assert verification["ok"] is False
+        assert verification["baseline_valid"] is False
     finally:
         db.close()
