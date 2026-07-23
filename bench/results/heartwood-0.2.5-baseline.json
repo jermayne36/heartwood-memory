@@ -1,0 +1,467 @@
+{
+  "benchmark": {
+    "name": "heartwood-trust-receipts-benchmark",
+    "target_heartwood_version": "0.2.5",
+    "version": "1.0.0"
+  },
+  "claim_scan": {
+    "clean": true,
+    "violation_count": 0,
+    "violations": []
+  },
+  "competitors": [
+    {
+      "capabilities": {
+        "auditable_retirement": null,
+        "crypto_erase_proof": null,
+        "external_anchor": null,
+        "hash_chained_audit": null,
+        "key_destruction_receipt": null,
+        "policy_before_ranking": null,
+        "signed_provenance": null,
+        "strict_enforcement": null
+      },
+      "name": "mem0",
+      "requirements": {
+        "api_surface": "mem0 client add()/search()/get_all()/delete()",
+        "free_tier": "hosted free tier exists; self-host OSS avoids signup",
+        "needs": "mem0 account + OpenAI (or configured LLM) API key",
+        "network": "third-party calls to mem0 + an embedding/LLM provider",
+        "probe_applicability": "Forgery/tamper/erasure probes measure whether a signed-provenance / hash-chained-audit / key-destruction primitive EXISTS to test; a real run reports primitive-absent where mem0 offers no equivalent receipt.",
+        "signup": "yes (hosted) \u2014 OUT of scope for a $0 no-signup run"
+      },
+      "status": "stub"
+    },
+    {
+      "capabilities": {
+        "auditable_retirement": null,
+        "crypto_erase_proof": null,
+        "external_anchor": null,
+        "hash_chained_audit": null,
+        "key_destruction_receipt": null,
+        "policy_before_ranking": null,
+        "signed_provenance": null,
+        "strict_enforcement": null
+      },
+      "name": "zep",
+      "requirements": {
+        "api_surface": "Zep memory add/search/delete; graph episodes",
+        "free_tier": "cloud free tier exists; self-host avoids signup",
+        "needs": "Zep Cloud API key or self-hosted Zep + Graphiti stack",
+        "network": "third-party calls to Zep + an embedding/LLM provider",
+        "probe_applicability": "Policy-leak and retirement probes map to Zep's access model and episode invalidation; a real run measures whether recall exclusion and audited retirement are enforced, not merely available.",
+        "signup": "yes (cloud) \u2014 OUT of scope for a $0 no-signup run"
+      },
+      "status": "stub"
+    },
+    {
+      "capabilities": {
+        "auditable_retirement": null,
+        "crypto_erase_proof": null,
+        "external_anchor": null,
+        "hash_chained_audit": null,
+        "key_destruction_receipt": null,
+        "policy_before_ranking": null,
+        "signed_provenance": null,
+        "strict_enforcement": null
+      },
+      "name": "supermemory",
+      "requirements": {
+        "api_surface": "Supermemory add/search/delete endpoints",
+        "free_tier": "free tier exists; requires account + API key",
+        "needs": "Supermemory API key",
+        "network": "third-party calls to the Supermemory API",
+        "probe_applicability": "All five probe classes require the corresponding governance receipt to exist; a real run reports primitive-absent for any receipt Supermemory does not provide, rather than a pass/fail comparison.",
+        "signup": "yes \u2014 OUT of scope for a $0 no-signup run"
+      },
+      "status": "stub"
+    }
+  ],
+  "probes": [
+    {
+      "cases": [
+        {
+          "case_id": "forgery_off_content_hash",
+          "case_type": "contract",
+          "claim_anchor": "content_provenance_authenticity",
+          "description": "A tampered content hash is surfaced as invalid at read (OFF mode).",
+          "expectation": "record present with content_hash_match=False and signature_valid=False",
+          "matches_contract": true,
+          "measured": {
+            "content_hash_match": false,
+            "retrieved": true,
+            "signature_valid": false
+          }
+        },
+        {
+          "case_id": "forgery_off_forged_signature",
+          "case_type": "contract",
+          "claim_anchor": "content_provenance_authenticity",
+          "description": "A forged producer signature fails verification and is surfaced.",
+          "expectation": "record present with signature_valid=False",
+          "matches_contract": true,
+          "measured": {
+            "retrieved": true,
+            "signature_valid": false
+          }
+        },
+        {
+          "case_id": "forgery_enforce_fails_closed",
+          "case_type": "contract",
+          "claim_anchor": "content_provenance_authenticity",
+          "description": "Strict ENFORCE fails the recall closed when a returnable record fails verification.",
+          "expectation": "recall raises StrictSignatureError naming the tampered id",
+          "matches_contract": true,
+          "measured": {
+            "dropped_ids": [
+              "mem_bench_forgery_0001"
+            ],
+            "raised": "StrictSignatureError"
+          }
+        },
+        {
+          "case_id": "forgery_filter_drops_and_counts",
+          "case_type": "contract",
+          "claim_anchor": "content_provenance_authenticity",
+          "description": "Strict FILTER drops the failing record and counts it (loud, not silent).",
+          "expectation": "record absent from results and present in strict_dropped ids",
+          "matches_contract": true,
+          "measured": {
+            "absent_from_results": true,
+            "strict_dropped_ids": [
+              "mem_bench_forgery_0001"
+            ]
+          }
+        },
+        {
+          "case_id": "forgery_boundary_unsigned_metadata",
+          "case_type": "boundary",
+          "claim_anchor": "NOT_CLAIMED:authorization_integrity",
+          "description": "Provenance signs (id, content_hash, source.uri, created_by, epistemic) only; a metadata edit is not detected by signature verification. Documented non-claim (see docs/api/continuity.md).",
+          "expectation": "signature_valid=True and content_hash_match=True despite a classification downgrade (measured boundary, not a defect)",
+          "matches_contract": true,
+          "measured": {
+            "classification_now": "internal",
+            "content_hash_match": true,
+            "retrieved": true,
+            "signature_valid": true
+          }
+        }
+      ],
+      "notes": [],
+      "probe_class": "forgery_injection",
+      "receipt_name": "Signed provenance",
+      "status": "PASS"
+    },
+    {
+      "cases": [
+        {
+          "case_id": "policy_leak_adversarial_cue",
+          "case_type": "contract",
+          "claim_anchor": "policy_before_ranking",
+          "description": "An adversarial cue targeting confidential content does not leak it to an under-cleared reader.",
+          "expectation": "confidential record absent from results; content not present",
+          "matches_contract": true,
+          "measured": {
+            "confidential_in_results": false,
+            "result_ids": [
+              "mem_bench_public_kb_0001"
+            ],
+            "text_leaked": false
+          }
+        },
+        {
+          "case_id": "policy_leak_denial_audited_not_surfaced",
+          "case_type": "contract",
+          "claim_anchor": "policy_before_ranking",
+          "description": "The denial is recorded on the audit log (operator-visible) but not surfaced in the caller result set (constant shape).",
+          "expectation": "audit denied>=1 while confidential record absent from results",
+          "matches_contract": true,
+          "measured": {
+            "confidential_in_results": false,
+            "denied_in_audit": 1
+          }
+        },
+        {
+          "case_id": "policy_leak_filter_cannot_escalate",
+          "case_type": "contract",
+          "claim_anchor": "policy_before_ranking",
+          "description": "Caller filters only narrow the candidate set; they cannot widen past the principal's clearance.",
+          "expectation": "confidential record still absent when caller passes allowed_classifications including 'confidential'",
+          "matches_contract": true,
+          "measured": {
+            "confidential_in_results": false,
+            "text_leaked": false
+          }
+        },
+        {
+          "case_id": "policy_positive_control_cleared_reader",
+          "case_type": "positive_control",
+          "claim_anchor": "policy_before_ranking",
+          "description": "A properly cleared principal (legal role, confidential clearance) does retrieve the confidential record.",
+          "expectation": "confidential record present for the cleared reader",
+          "matches_contract": true,
+          "measured": {
+            "confidential_in_results": true
+          }
+        },
+        {
+          "case_id": "policy_leak_boundary_db_write_downgrade",
+          "case_type": "boundary",
+          "claim_anchor": "NOT_CLAIMED:authorization_integrity",
+          "description": "Recall authorization runs on unsigned mutable metadata (classification, roles); a database-write attacker can downgrade it and reach the record. Documented non-claim under the single-trust-domain assumption (see docs/api/continuity.md).",
+          "expectation": "under-cleared reader reaches the record after a raw metadata downgrade (measured boundary, not a recall-time defect)",
+          "matches_contract": true,
+          "measured": {
+            "reached_after_downgrade": true,
+            "result_ids": [
+              "mem_bench_confidential_0001"
+            ]
+          }
+        }
+      ],
+      "notes": [],
+      "probe_class": "policy_leak",
+      "receipt_name": "Policy before ranking",
+      "status": "PASS"
+    },
+    {
+      "cases": [
+        {
+          "case_id": "tamper_inplace_edit_detected",
+          "case_type": "contract",
+          "claim_anchor": "tamper_evidence",
+          "description": "An in-place edit of an audit row body is detected by verify_audit().",
+          "expectation": "verify_audit() True before, False after the edit",
+          "matches_contract": true,
+          "measured": {
+            "after": false,
+            "before": true
+          }
+        },
+        {
+          "case_id": "tamper_interior_drop_detected",
+          "case_type": "contract",
+          "claim_anchor": "tamper_evidence",
+          "description": "Dropping an interior audit row breaks the hash chain and is detected.",
+          "expectation": "verify_audit() False after the interior row is dropped",
+          "matches_contract": true,
+          "measured": {
+            "after": false
+          }
+        },
+        {
+          "case_id": "tamper_tail_truncation_chain_boundary",
+          "case_type": "boundary",
+          "claim_anchor": "tamper_evidence",
+          "description": "The in-database chain alone cannot see tail-truncation: the surviving prefix still hashes consistently. Documented boundary (README: 'tail-truncation needs an external anchor').",
+          "expectation": "verify_audit() stays True after the last row is truncated (measured boundary)",
+          "matches_contract": true,
+          "measured": {
+            "chain_only_verify": true
+          }
+        },
+        {
+          "case_id": "tamper_tail_truncation_anchor_detects",
+          "case_type": "contract",
+          "claim_anchor": "tamper_evidence",
+          "description": "With an external anchor, the same tail-truncation is detected.",
+          "expectation": "verify_against_anchors() reports ok=False while chain_ok=True",
+          "matches_contract": true,
+          "measured": {
+            "anchor_ok": false,
+            "anchor_status": "degraded",
+            "chain_ok": true
+          }
+        },
+        {
+          "case_id": "tamper_positive_control_clean_chain",
+          "case_type": "positive_control",
+          "claim_anchor": "tamper_evidence",
+          "description": "An untouched chain verifies and its anchor verification passes.",
+          "expectation": "verify_audit() True and verify_against_anchors() ok=True",
+          "matches_contract": true,
+          "measured": {
+            "anchor_ok": true,
+            "chain": true
+          }
+        }
+      ],
+      "notes": [],
+      "probe_class": "audit_tamper_detection",
+      "receipt_name": "Tamper-evident audit",
+      "status": "PASS"
+    },
+    {
+      "cases": [
+        {
+          "case_id": "retire_unindex_removes_from_corpus",
+          "case_type": "contract",
+          "claim_anchor": "auditable_retirement",
+          "description": "set_indexed(False) removes a record from the answerable corpus; no opt-in or back-dated filter reaches it.",
+          "expectation": "record absent from default recall AND from an opt-in (include_expired + all review states) recall",
+          "matches_contract": true,
+          "measured": {
+            "in_default": false,
+            "in_optin": false
+          }
+        },
+        {
+          "case_id": "retire_expire_default_hidden_optin_visible",
+          "case_type": "contract",
+          "claim_anchor": "auditable_retirement",
+          "description": "expire() removes a record from default recall but keeps it reachable via include_expired.",
+          "expectation": "absent by default, present with include_expired=True",
+          "matches_contract": true,
+          "measured": {
+            "in_default": false,
+            "in_include_expired": true
+          }
+        },
+        {
+          "case_id": "retire_supersede_default_hidden_optin_visible",
+          "case_type": "contract",
+          "claim_anchor": "auditable_retirement",
+          "description": "transition_review(superseded) hides a record from default recall but keeps it reachable via include_review_states.",
+          "expectation": "absent by default, present with include_review_states=[superseded]",
+          "matches_contract": true,
+          "measured": {
+            "in_default": false,
+            "in_include_superseded": true
+          }
+        },
+        {
+          "case_id": "retire_is_audited_and_chain_valid",
+          "case_type": "contract",
+          "claim_anchor": "auditable_retirement",
+          "description": "Each retirement writes an audit event and the hash chain still verifies.",
+          "expectation": "index_state audit event present for the unindexed record and verify_audit() True",
+          "matches_contract": true,
+          "measured": {
+            "chain": true,
+            "index_state_audited": true
+          }
+        },
+        {
+          "case_id": "retire_boundary_raw_write_unaudited",
+          "case_type": "boundary",
+          "claim_anchor": "NOT_CLAIMED:tamper_proof_rbac_or_visibility",
+          "description": "A direct UPDATE to `indexed` bypasses set_indexed() and removes the record from recall with nothing on the audit log. Documented boundary (docs: 'direct column writes are a policy violation').",
+          "expectation": "record gone from recall AND no index_state audit event for it (measured boundary, not a defect)",
+          "matches_contract": true,
+          "measured": {
+            "gone_from_recall": true,
+            "no_audit_event": true
+          }
+        }
+      ],
+      "notes": [],
+      "probe_class": "record_retirement",
+      "receipt_name": "Recall visibility and retirement",
+      "status": "PASS"
+    },
+    {
+      "cases": [
+        {
+          "case_id": "erasure_forget_shreds_key",
+          "case_type": "contract",
+          "claim_anchor": "content_provenance_authenticity",
+          "description": "forget(mode=hard) returns a key-destruction receipt and purges derived artifacts.",
+          "expectation": "key_shredded=True and purged>=1",
+          "matches_contract": true,
+          "measured": {
+            "key_shredded": true,
+            "purged": 1
+          }
+        },
+        {
+          "case_id": "erasure_content_unreachable_after_forget",
+          "case_type": "contract",
+          "claim_anchor": "content_provenance_authenticity",
+          "description": "After a hard forget the subject's content is no longer returned by recall.",
+          "expectation": "record absent from recall after forget",
+          "matches_contract": true,
+          "measured": {
+            "in_recall": false,
+            "raw_active_keys_before": 1
+          }
+        },
+        {
+          "case_id": "erasure_crypto_erase_proof",
+          "case_type": "contract",
+          "claim_anchor": "content_provenance_authenticity",
+          "description": "prove_crypto_erase_path reports the subject key shredded and, with the root absent, content unrecoverable.",
+          "expectation": "content_unrecoverable=True, proved=True, raw_active_key_count=0, shredded_key_count>=1",
+          "matches_contract": true,
+          "measured": {
+            "content_unrecoverable": true,
+            "proved": true,
+            "raw_active_key_count": 0,
+            "shredded_key_count": 1
+          }
+        },
+        {
+          "case_id": "erasure_event_retained_and_chain_valid",
+          "case_type": "contract",
+          "claim_anchor": "content_provenance_authenticity",
+          "description": "The erasure event is retained on the hash chain even after the payload is shredded, and the chain still verifies.",
+          "expectation": "forget audit event present and verify_audit() True",
+          "matches_contract": true,
+          "measured": {
+            "chain": true,
+            "forget_audited": true
+          }
+        },
+        {
+          "case_id": "erasure_boundary_conditional_on_root_absence",
+          "case_type": "boundary",
+          "claim_anchor": "NOT_CLAIMED:db_compromise_resistance",
+          "description": "The proof is conditional: with the wrapping root still present it does not assert unrecoverability. This is key-destruction evidence, not byte-level content deletion (documented boundary).",
+          "expectation": "content_unrecoverable=False when root_present=True (measured boundary, not a defect)",
+          "matches_contract": true,
+          "measured": {
+            "content_unrecoverable": false,
+            "reason": "root still present"
+          }
+        }
+      ],
+      "notes": [],
+      "probe_class": "erasure_receipts",
+      "receipt_name": "Key-destruction receipt",
+      "status": "PASS"
+    }
+  ],
+  "reproducibility": {
+    "deterministic_models": "heartwood dev hashing embedder + lexical reranker",
+    "fixed_fixtures": true,
+    "note": "governance behavior is embedder-independent; retrieval quality is not measured",
+    "offline": true
+  },
+  "run_metadata": {
+    "generated_at_pacific": "2026-07-23 15:29:55 PDT",
+    "generated_at_utc": "2026-07-23T22:29:55.928643+00:00",
+    "platform": "macOS-26.5.2-arm64-arm-64bit",
+    "python": "3.11.15"
+  },
+  "spend_receipt": {
+    "new_credentials_or_signups": 0,
+    "new_runtime_dependencies": 0,
+    "notes": "stdlib + numpy (a Heartwood dependency) only; competitor adapters are stubs; PyPI installation of Heartwood's own declared dependencies is not a third-party service call",
+    "third_party_network_calls": 0,
+    "usd_spent": 0
+  },
+  "summary": {
+    "boundaries_published": 5,
+    "contract_cases_failed": 0,
+    "contract_cases_upheld": 20,
+    "overall": "PASS",
+    "probe_status_counts": {
+      "PASS": 5
+    }
+  },
+  "system_under_test": {
+    "adapter": "heartwood",
+    "heartwood_version_measured": "0.2.5",
+    "version_match": true
+  }
+}
