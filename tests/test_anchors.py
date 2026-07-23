@@ -116,6 +116,37 @@ def test_seal_verify_roundtrip_and_close_anchor(tmp_path):
         reopened.close()
 
 
+def test_cadence_check_does_not_rescan_full_chain_below_threshold(
+    tmp_path,
+    monkeypatch,
+):
+    store = Store(tmp_path / "cadence-fast-path.db")
+    writer, _, _ = _writer(
+        store,
+        tmp_path / "anchors.jsonl",
+        interval_s=300,
+        every_n_rows=100,
+    )
+    audit = AuditLog(store, after_append=writer.maybe_anchor)
+    try:
+        _append(audit, 1)
+
+        def unexpected_full_chain_scan(*args, **kwargs):
+            raise AssertionError("cadence check scanned the full audit chain")
+
+        monkeypatch.setattr(
+            "heartwood.anchors.verify_chain_against_anchors",
+            unexpected_full_chain_scan,
+        )
+        _append(audit, 2)
+        cadence = writer.maybe_anchor()
+        assert store.audit_head()["seq"] == 2
+        assert cadence["verification_scope"] == "cadence_only"
+        assert cadence["ok"] is None
+    finally:
+        store.close()
+
+
 def test_truncation_at_latest_anchor_is_detected_while_chain_prefix_passes(tmp_path):
     db_path = tmp_path / "truncate.db"
     store = Store(db_path)

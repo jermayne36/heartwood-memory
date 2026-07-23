@@ -331,7 +331,7 @@ class AnchorWriter:
 
     def maybe_anchor(self) -> dict[str, Any]:
         """Apply count/time cadence without failing the main audit write path."""
-        status = self.verify()
+        status = self._cadence_status()
         if not status["anchor_due"]:
             self._schedule_time_anchor(status)
             return status
@@ -365,6 +365,119 @@ class AnchorWriter:
                 else None
             ),
         )
+
+    def _cadence_status(self) -> dict[str, Any]:
+        """Decide cadence without scanning the full audit chain on every append."""
+        self.last_failure = self.store.anchor_failure(self.sink.sink_id)
+        checked_at = self.clock()
+        head = self.store.audit_head_snapshot()
+        base = {
+            "ok": None,
+            "anchor_status": "degraded",
+            "verification_scope": "cadence_only",
+            "chain_ok": None,
+            "chain_id": self.chain_id,
+            "sink_id": self.sink.sink_id,
+            "sink_healthy": False,
+            "anchors_ok": None,
+            "anchor_fresh": False,
+            "anchors_checked": 0,
+            "last_success_anchor_id": None,
+            "last_success_seq": None,
+            "last_success_time_utc": None,
+            "current_seq": head["seq"],
+            "current_time_utc": _utc_iso(checked_at),
+            "rows_since_success": head["seq"],
+            "seconds_since_success": None,
+            "interval_s": self.interval_s,
+            "every_n_rows": self.every_n_rows,
+            "anchor_due": head["seq"] > 0,
+            "undetectable_window_rows": head["seq"],
+            "first_failure": None,
+            "last_sanitized_error_class": (
+                self.last_failure["error_class"] if self.last_failure else None
+            ),
+        }
+        try:
+            records = self.sink.read_records()
+            valid = _validate_sink_records(
+                records,
+                sink_id=self.sink.sink_id,
+                chain_id=self.chain_id,
+                trusted_root_fingerprints=self.trusted_root_fingerprints,
+            )
+        except FileNotFoundError:
+            return {**base, "ok": False, "first_failure": "anchor_sink_missing"}
+        except Exception as exc:
+            return {
+                **base,
+                "ok": False,
+                "first_failure": "anchor_sink_unhealthy",
+                "last_sanitized_error_class": type(exc).__name__,
+            }
+
+        anchors = [
+            record for record in valid if record["record_type"] == "audit_anchor"
+        ]
+        status = {**base, "sink_healthy": True, "anchors_checked": len(anchors)}
+        if not anchors:
+            return {**status, "ok": False, "first_failure": "no_anchors"}
+
+        previous_seq = 0
+        seen_ids = set()
+        for record in anchors:
+            if record["anchor_id"] in seen_ids or record["seq"] <= previous_seq:
+                return {
+                    **status,
+                    "ok": False,
+                    "first_failure": "duplicate_or_reordered_anchor",
+                }
+            seen_ids.add(record["anchor_id"])
+            previous_seq = record["seq"]
+
+        sink_head = self.store.anchor_sink_head(self.sink.sink_id)
+        if not valid or sink_head != _record_digest(valid[-1]):
+            return {
+                **status,
+                "ok": False,
+                "first_failure": "anchor_sink_rollback_or_divergence",
+            }
+
+        latest = anchors[-1]
+        if head["seq"] < latest["seq"]:
+            return {
+                **status,
+                "ok": False,
+                "first_failure": f"current_head_precedes_anchor:{latest['anchor_id']}",
+            }
+        rows_since = head["seq"] - latest["seq"]
+        seconds_since = max(
+            0.0,
+            checked_at - _parse_utc(latest["created_at_utc"]),
+        )
+        due = rows_since > 0 and (
+            rows_since >= self.every_n_rows or seconds_since >= self.interval_s
+        )
+        degraded = due or self.last_failure is not None
+        first_failure = None
+        if due:
+            first_failure = "latest_anchor_stale"
+        elif self.last_failure is not None:
+            first_failure = "prior_anchor_write_failed"
+        return {
+            **status,
+            "ok": False if degraded else None,
+            "anchor_status": "degraded" if degraded else "healthy",
+            "anchor_fresh": not due,
+            "last_success_anchor_id": latest["anchor_id"],
+            "last_success_seq": latest["seq"],
+            "last_success_time_utc": latest["created_at_utc"],
+            "rows_since_success": rows_since,
+            "seconds_since_success": seconds_since,
+            "anchor_due": due,
+            "undetectable_window_rows": rows_since,
+            "first_failure": first_failure,
+        }
 
     def pin_manifest(self, manifest_id: str, manifest_digest: str) -> dict[str, Any]:
         """Append a signed, monotonic strict-manifest digest pin to the sink."""
