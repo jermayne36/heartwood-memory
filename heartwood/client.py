@@ -338,9 +338,21 @@ class Heartwood:
                  memory_id=None, truth_status=None, policy_scope="default",
                  valid_from=None, valid_until=None, entities=(), source_ids=(),
                  source_spans=(), subject_ids=(), created_at=None, review_state=None,
-                 index_text=None):
+                 index_text=None, indexed=True):
         if epistemic == Epistemic.APPROVED_CANONICAL.value:
             raise PermissionError("approved-canonical requires approve(), not remember()")
+        if type(indexed) is not bool:
+            raise TypeError("indexed must be a bool")
+        if kind == "capability-contract" or policy_scope == "continuity-privileged":
+            if (
+                kind != "capability-contract"
+                or policy_scope != "continuity-privileged"
+                or indexed
+            ):
+                raise PermissionError(
+                    "capability contracts require the continuity-privileged "
+                    "scope and indexed=False"
+                )
         policy = policy or Policy()
         source = source or {}
         # High-water-mark: a derived memory inherits the policy of its most-
@@ -410,19 +422,22 @@ class Heartwood:
                        "pii": policy.pii, "roles": policy.roles, "role_groups": policy.role_groups,
                        "attrs": policy.attrs, "retention": policy.retention},
             "producer_sig": sig, "sig_valid": sig_valid,
+            "indexed": indexed,
         }
         self.store.insert_memory(row, content_enc, emb)
-        self._cache_text_pair(mem_id, content, text_to_index)
-        self._tokens_for_index_text(mem_id, text_to_index)
-        self._bm25_corpus_cache.clear()
-        self.index.add(mem_id, self.tenant, emb)
+        if indexed:
+            self._cache_text_pair(mem_id, content, text_to_index)
+            self._tokens_for_index_text(mem_id, text_to_index)
+            self._bm25_corpus_cache.clear()
+            self.index.add(mem_id, self.tenant, emb)
         for p in derived_from:
             self.store.add_edge(mem_id, p)
         self.store.register_lineage(mem_id, "memory", subject, self.tenant)
         self.store.register_lineage(f"emb:{mem_id}", "embedding", subject, self.tenant)
         self.audit.append(self.tenant, created_by, "remember", mem_id,
                           {"kind": kind, "epistemic": epistemic,
-                           "classification": policy.classification})
+                           "classification": policy.classification,
+                           "indexed": indexed})
         return mem_id
 
     def evaluate_egress(self, request: dict, provider_registry: dict | None = None) -> dict:
@@ -1038,6 +1053,12 @@ class Heartwood:
         meta = self.store.get_meta(mem_id)
         if not meta:
             raise KeyError(f"unknown memory id: {mem_id}")
+        if (
+            target
+            and meta.get("kind") == "capability-contract"
+            and meta.get("policy_scope") == "continuity-privileged"
+        ):
+            raise PermissionError("capability contracts cannot enter ordinary recall")
         from_state = bool(meta["indexed"])
         if not self.store.update_indexed(mem_id, target, expected_from=from_state):
             current = self.store.get_meta(mem_id)
@@ -1124,6 +1145,17 @@ class Heartwood:
     # -- trusted internals (same-process adapters: e.g. memory-tool backend) --- #
     def read_content(self, mem_id: str) -> str | None:
         """Decrypt a memory's content. Trusted, in-process callers only."""
+        meta = self.store.get_meta(mem_id)
+        if (
+            meta
+            and meta.get("kind") == "capability-contract"
+            and meta.get("policy_scope") == "continuity-privileged"
+        ):
+            return None
+        return self._read_content_unchecked(mem_id)
+
+    def _read_content_unchecked(self, mem_id: str) -> str | None:
+        """Decrypt content for narrowly scoped internal governance adapters."""
         enc, subject = self.store.get_content_enc(mem_id)
         if enc is None:
             return None

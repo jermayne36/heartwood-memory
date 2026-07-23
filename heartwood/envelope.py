@@ -16,6 +16,7 @@ _ULID_T = re.compile(r"[^a-z0-9]")
 
 class Kind(str, Enum):
     SOURCE = "source"
+    CAPABILITY_CONTRACT = "capability-contract"
     EPISODIC = "episodic"
     SEMANTIC = "semantic"
     PROCEDURAL = "procedural"

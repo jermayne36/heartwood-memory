@@ -133,7 +133,7 @@ class Store:
                subject_ids_json,entities_json,source_ids_json,source_spans_json,source_json,model_version,visibility,classification,pii,
                roles_json,role_groups_json,attrs_json,retention,producer_sig,sig_valid,
                review_state,index_text_enc,content_enc,emb,emb_dim,indexed)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (m["id"], m["tenant"], m["kind"], m["epistemic"], m["subject"], m["confidence"],
              m["salience"], m["created_by"], m["created_at"], m["content_hash"],
              m.get("truth_status"), m.get("policy_scope", "default"), m.get("valid_from"),
@@ -146,7 +146,8 @@ class Store:
              json.dumps([list(g) for g in m["policy"].get("role_groups", ())]),
              json.dumps([list(a) for a in m["policy"]["attrs"]]), m["policy"]["retention"],
              m["producer_sig"], int(m["sig_valid"]), m.get("review_state"),
-             m.get("index_text_enc"), content_enc, emb_bytes, emb_dim),
+             m.get("index_text_enc"), content_enc, emb_bytes, emb_dim,
+             int(m.get("indexed", True))),
         )
         self.conn.commit()
 
@@ -190,7 +191,10 @@ class Store:
         return matches
 
     def all_embeddings(self):
-        for r in self.conn.execute("SELECT id, tenant, emb, emb_dim FROM memories WHERE emb_dim>0"):
+        for r in self.conn.execute(
+            "SELECT id, tenant, emb, emb_dim FROM memories "
+            "WHERE emb_dim>0 AND indexed=1"
+        ):
             yield r["id"], r["tenant"], np.frombuffer(r["emb"], dtype=np.float32)
 
     def memory_counts_by_tenant(self) -> dict[str, int]:
@@ -320,7 +324,11 @@ class Store:
 
     def index_lag(self, tenant: str) -> int:
         return self.conn.execute(
-            "SELECT COUNT(*) FROM memories WHERE tenant=? AND indexed=0", (tenant,)
+            "SELECT COUNT(*) FROM memories "
+            "WHERE tenant=? AND indexed=0 "
+            "AND NOT (kind='capability-contract' "
+            "AND COALESCE(policy_scope, 'default')='continuity-privileged')",
+            (tenant,),
         ).fetchone()[0]
 
     # -- provenance / lineage ------------------------------------------- #
@@ -622,6 +630,56 @@ class Store:
             )
             self.conn.commit()
             return transition["row_hash"]
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def append_audit_bound_atomic(
+        self,
+        tenant,
+        principal,
+        action,
+        target,
+        body_builder,
+    ) -> dict:
+        """Append a row after its exact sequence is available to the body builder."""
+        try:
+            self.conn.execute("BEGIN IMMEDIATE")
+            head = self.audit_head()
+            ts = time.time()
+            cursor = self.conn.execute(
+                "INSERT INTO audit_log "
+                "(ts,tenant,principal,action,target,body,prev_hash,row_hash) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    ts,
+                    tenant,
+                    principal,
+                    action,
+                    target,
+                    "",
+                    head["row_hash"],
+                    "",
+                ),
+            )
+            seq = int(cursor.lastrowid)
+            body = body_builder(seq)
+            if not isinstance(body, str):
+                raise TypeError("bound audit body builder must return a string")
+            row_hash = hashlib.sha256(
+                (head["row_hash"] + body + repr(ts)).encode()
+            ).hexdigest()
+            self.conn.execute(
+                "UPDATE audit_log SET body=?,row_hash=? WHERE seq=?",
+                (body, row_hash, seq),
+            )
+            self.conn.commit()
+            return {
+                "seq": seq,
+                "ts": ts,
+                "prev_hash": head["row_hash"],
+                "row_hash": row_hash,
+            }
         except Exception:
             self.conn.rollback()
             raise
