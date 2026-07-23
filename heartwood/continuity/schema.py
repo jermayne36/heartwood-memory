@@ -48,6 +48,10 @@ _SECRET_MARKERS = (
     "secret=",
     "token=",
 )
+_APPROVED_PROVIDER_MODELS = {
+    "provider.catalog": frozenset({"model/catalog-v1"}),
+    "prototype.stub": frozenset({"stub/from-v1", "stub/to-v1"}),
+}
 
 
 class ContinuityValidationError(ValueError):
@@ -250,6 +254,7 @@ class CapabilityContract:
         _opaque_id(self.route_id, "route_", "route_id")
         _safe_label(self.provider, "provider")
         _safe_label(self.model, "model")
+        _approved_provider_model(self.provider, self.model)
         _require_bool(self.tool_use, "tool_use")
         if not isinstance(self.structured_output, StructuredOutput):
             raise ContinuityValidationError("structured_output")
@@ -392,25 +397,56 @@ class EvalSuiteBinding:
 class BaselineBinding:
     receipt_id: str
     receipt_hash: str
+    audit_seq: int
 
     def __post_init__(self) -> None:
         _opaque_id(self.receipt_id, "rot_", "baseline_receipt_id")
         _hash(self.receipt_hash, "baseline_receipt_hash")
+        _bounded_int(
+            self.audit_seq,
+            1,
+            9_223_372_036_854_775_807,
+            "baseline_audit_seq",
+        )
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> BaselineBinding:
         data = _require_mapping(value, "baseline_binding")
-        _require_exact_keys(data, {"receipt_id", "receipt_hash"}, "baseline_binding")
+        _require_exact_keys(
+            data,
+            {"receipt_id", "receipt_hash", "audit_seq"},
+            "baseline_binding",
+        )
         return cls(
             receipt_id=data["receipt_id"],
             receipt_hash=data["receipt_hash"],
+            audit_seq=data["audit_seq"],
         )
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "receipt_id": self.receipt_id,
             "receipt_hash": self.receipt_hash,
+            "audit_seq": self.audit_seq,
         }
+
+
+@dataclass(frozen=True)
+class GenesisMarker:
+    is_genesis: bool
+
+    def __post_init__(self) -> None:
+        if self.is_genesis is not True:
+            raise ContinuityValidationError("genesis_marker")
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> GenesisMarker:
+        data = _require_mapping(value, "genesis_marker")
+        _require_exact_keys(data, {"is_genesis"}, "genesis_marker")
+        return cls(is_genesis=data["is_genesis"])
+
+    def to_dict(self) -> dict[str, bool]:
+        return {"is_genesis": True}
 
 
 @dataclass(frozen=True)
@@ -631,7 +667,7 @@ class RotationReceiptDraft:
     to_contract: ContractBinding
     eval_suite: EvalSuiteBinding
     run_id: str
-    prior_baseline: BaselineBinding
+    prior_baseline: BaselineBinding | GenesisMarker
     ts: str
     cases: tuple[RotationCase, ...]
     summary: RotationSummary
@@ -655,7 +691,7 @@ class RotationReceiptDraft:
         if not isinstance(self.eval_suite, EvalSuiteBinding):
             raise ContinuityValidationError("eval_suite")
         _opaque_id(self.run_id, "run_", "run_id")
-        if not isinstance(self.prior_baseline, BaselineBinding):
+        if not isinstance(self.prior_baseline, (BaselineBinding, GenesisMarker)):
             raise ContinuityValidationError("prior_baseline")
         _utc_timestamp(self.ts)
         if not isinstance(self.cases, tuple) or not self.cases:
@@ -719,7 +755,7 @@ class RotationReceiptDraft:
             to_contract=ContractBinding.from_dict(data["to_contract"]),
             eval_suite=EvalSuiteBinding.from_dict(data["eval_suite"]),
             run_id=data["run_id"],
-            prior_baseline=BaselineBinding.from_dict(data["prior_baseline"]),
+            prior_baseline=_prior_baseline(data["prior_baseline"]),
             ts=data["ts"],
             cases=tuple(RotationCase.from_dict(item) for item in cases),
             summary=RotationSummary.from_dict(data["summary"]),
@@ -875,6 +911,11 @@ def _safe_region(value: Any) -> str:
     return value
 
 
+def _approved_provider_model(provider: str, model: str) -> None:
+    if model not in _APPROVED_PROVIDER_MODELS.get(provider, ()):
+        raise ContinuityValidationError("approved_provider_model")
+
+
 def _safe_principal(value: Any) -> str:
     if not isinstance(value, str):
         raise ContinuityValidationError("signed_by")
@@ -952,6 +993,13 @@ def _parse_enum(value: Any, enum_cls: type[Enum], category: str):
 
 def _optional_enum(value: Any, enum_cls: type[Enum], category: str):
     return None if value is None else _parse_enum(value, enum_cls, category)
+
+
+def _prior_baseline(value: Any) -> BaselineBinding | GenesisMarker:
+    data = _require_mapping(value, "prior_baseline")
+    if set(data) == {"is_genesis"}:
+        return GenesisMarker.from_dict(data)
+    return BaselineBinding.from_dict(data)
 
 
 def _require_enum(value: Any, enum_cls: type[Enum], category: str) -> None:

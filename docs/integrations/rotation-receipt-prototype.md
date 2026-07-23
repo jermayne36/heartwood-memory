@@ -9,6 +9,9 @@ outcomes, bounded numbers, and fixed error categories before it calls the
 public `heartwood.continuity` API. The result is a real signed, audit-bound
 rotation receipt labeled `evidence_mode=prototype`.
 
+The public API replaces the prototype's fixture ids with boundary-minted route,
+receipt, run, and case ids before canonical rendering.
+
 The prototype has no provider SDK, network route, subprocess, shell tool, file
 tool, or model-generated tool surface. Its run summary therefore reports
 `live_routes=0`, `stub_routes=2`, and `child_processes=0`.
@@ -27,14 +30,15 @@ python3.11 examples/rotation-receipt-prototype/run_prototype.py \
 The prototype-only output contains:
 
 - `rotation-receipt.json` — the canonical signed measured diff;
-- `baseline-receipt.json` — the real signed prior baseline bound by the final
-  prototype receipt;
+- `baseline-receipt.json` — the real signed genesis receipt bound by the final
+  prototype receipt through its id, hash, and audit sequence;
 - `run-summary.json` — fixed claim scope, route counts, verification booleans,
   and sentinel negative-control results;
 - `prototype-report.md` — a visibly labeled rendered prototype receipt;
 - `heartwood-prototype.db` — the throwaway local audit store used for the run.
 
 `Continuity.verify_rotation_receipt()` verifies the detached signature, the
-exact audit event binding, and the audit chain. The prototype receipt
+exact audit event binding, the audit chain, and the prior receipt or explicit
+genesis binding. The prototype receipt
 authenticates the measured diff bytes; it does not claim that a production
 provider catalog was executed or that the toy eval predicts production quality.

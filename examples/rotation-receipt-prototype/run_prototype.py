@@ -50,7 +50,6 @@ BASELINE_RECEIPT_ID = "rot_bet3baseline001"
 ROTATION_RECEIPT_ID = "rot_bet3prototype01"
 BASELINE_RUN_ID = "run_bet3baseline0001"
 ROTATION_RUN_ID = "run_bet3prototype001"
-GENESIS_BASELINE_ID = "rot_bet3genesis0001"
 PROTOTYPE_ENV_SENTINEL = "HEARTWOOD_ROTATION_RECEIPT_PROTOTYPE_SENTINEL"
 
 RESPONSE_SCHEMA: dict[str, Any] = {
@@ -411,8 +410,22 @@ def run_prototype(
         principal = _admin()
         continuity = Continuity(db)
         from_contract, to_contract = _contracts()
-        continuity.store_capability_contract(from_contract, principal=principal)
-        continuity.store_capability_contract(to_contract, principal=principal)
+        stored_from = continuity.store_capability_contract(
+            from_contract,
+            principal=principal,
+        )
+        stored_to = continuity.store_capability_contract(
+            to_contract,
+            principal=principal,
+        )
+        from_contract = continuity.get_capability_contract(
+            stored_from.memory_id,
+            principal=principal,
+        )
+        to_contract = continuity.get_capability_contract(
+            stored_to.memory_id,
+            principal=principal,
+        )
         measured_cases = execute_suite(
             suite,
             from_route,
@@ -428,8 +441,7 @@ def run_prototype(
                 to_contract,
                 receipt_id=BASELINE_RECEIPT_ID,
                 run_id=BASELINE_RUN_ID,
-                baseline_receipt_id=GENESIS_BASELINE_ID,
-                baseline_receipt_hash=content_hash({"prototype_baseline": "genesis"}),
+                prior_baseline={"is_genesis": True},
             ),
             principal=principal,
         )
@@ -445,8 +457,11 @@ def run_prototype(
                 to_contract,
                 receipt_id=ROTATION_RECEIPT_ID,
                 run_id=ROTATION_RUN_ID,
-                baseline_receipt_id=baseline.draft.receipt_id,
-                baseline_receipt_hash=baseline.receipt_hash,
+                prior_baseline={
+                    "receipt_id": baseline.draft.receipt_id,
+                    "receipt_hash": baseline.receipt_hash,
+                    "audit_seq": baseline.audit_seq,
+                },
             ),
             principal=principal,
         )
@@ -557,8 +572,7 @@ def _draft(
     *,
     receipt_id: str,
     run_id: str,
-    baseline_receipt_id: str,
-    baseline_receipt_hash: str,
+    prior_baseline: Mapping[str, Any],
 ) -> RotationReceiptDraft:
     summary = {outcome.value: 0 for outcome in Outcome}
     for case in measured_cases:
@@ -586,10 +600,7 @@ def _draft(
                 "eval_suite_hash": content_hash(suite.to_dict()),
             },
             "run_id": run_id,
-            "prior_baseline": {
-                "receipt_id": baseline_receipt_id,
-                "receipt_hash": baseline_receipt_hash,
-            },
+            "prior_baseline": dict(prior_baseline),
             "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "cases": list(measured_cases),
             "summary": {

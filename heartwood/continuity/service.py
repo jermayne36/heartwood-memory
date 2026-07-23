@@ -9,6 +9,7 @@ custodian. This module does not add a second key system.
 from __future__ import annotations
 
 import json
+import secrets
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -19,8 +20,11 @@ from ..provenance import verify_meta
 from .schema import (
     RECEIPT_SIGNATURE_DOMAIN,
     RECEIPT_SIGNING_VERSION,
+    BaselineBinding,
     CapabilityContract,
     ContractBinding,
+    EvidenceMode,
+    GenesisMarker,
     RotationReceiptDraft,
     SignedRotationReceipt,
     canonical_bytes,
@@ -54,6 +58,7 @@ class Continuity:
 
     def __init__(self, heartwood):
         self.heartwood = heartwood
+        self._route_aliases: dict[str, str] = {}
 
     def store_capability_contract(
         self,
@@ -68,6 +73,7 @@ class Continuity:
             if isinstance(contract, CapabilityContract)
             else CapabilityContract.from_dict(contract)
         )
+        parsed = self._mint_contract_routes(parsed)
         payload = canonical_json(parsed.to_dict())
         memory_id = self.heartwood.remember(
             payload,
@@ -131,8 +137,20 @@ class Continuity:
             if isinstance(draft, RotationReceiptDraft)
             else RotationReceiptDraft.from_dict(draft)
         )
-        self._require_stored_binding(parsed.from_contract)
-        self._require_stored_binding(parsed.to_contract)
+        if parsed.evidence_mode is EvidenceMode.PRODUCTION:
+            raise ContinuityIntegrityError(
+                "production evidence requires validated execution attestation"
+            )
+        parsed = self._mint_receipt_ids(parsed)
+        audit = AuditLog(self.heartwood.store)
+        if not audit.verify_chain():
+            raise ContinuityIntegrityError("rotation receipt audit chain invalid")
+        lineage_hash = self._route_lineage_hash(parsed)
+        if not self._baseline_valid(
+            parsed.prior_baseline,
+            lineage_hash=lineage_hash,
+        ):
+            raise ContinuityIntegrityError("rotation receipt prior baseline invalid")
 
         # Registration may persist the public key, so it must complete before
         # append_bound opens the audit write transaction.
@@ -140,6 +158,13 @@ class Continuity:
         receipt_box: dict[str, SignedRotationReceipt] = {}
 
         def build_detail(audit_seq: int) -> dict[str, str]:
+            if (
+                isinstance(parsed.prior_baseline, BaselineBinding)
+                and parsed.prior_baseline.audit_seq >= audit_seq
+            ):
+                raise ContinuityIntegrityError(
+                    "rotation receipt prior baseline ordering invalid"
+                )
             unsigned_payload = {
                 **parsed.to_dict(),
                 "signing_version": RECEIPT_SIGNING_VERSION,
@@ -167,6 +192,7 @@ class Continuity:
             receipt_box["receipt"] = receipt
             return {
                 "receipt_hash": receipt.receipt_hash,
+                "lineage_hash": lineage_hash,
                 "status": receipt.draft.evidence_mode.value,
             }
 
@@ -186,7 +212,7 @@ class Continuity:
         self,
         receipt: SignedRotationReceipt | Mapping[str, Any],
     ) -> dict[str, Any]:
-        """Verify the measured diff signature, audit binding, and audit chain."""
+        """Verify signature, current audit binding/chain, and prior baseline."""
         try:
             parsed = (
                 receipt
@@ -199,6 +225,7 @@ class Continuity:
                 "signature_valid": False,
                 "audit_event_valid": False,
                 "audit_chain_valid": False,
+                "baseline_valid": False,
             }
 
         signature_valid = self.heartwood.signer.verify_detached(
@@ -210,14 +237,81 @@ class Continuity:
         row = self.heartwood.store.audit_row(parsed.audit_seq)
         audit_event_valid = self._audit_row_matches_receipt(row, parsed)
         audit_chain_valid = AuditLog(self.heartwood.store).verify_chain()
+        baseline_valid = self._baseline_valid(
+            parsed.draft.prior_baseline,
+            lineage_hash=self._route_lineage_hash(parsed.draft),
+            current_audit_seq=parsed.audit_seq,
+        )
         return {
-            "ok": signature_valid and audit_event_valid and audit_chain_valid,
+            "ok": (
+                signature_valid
+                and audit_event_valid
+                and audit_chain_valid
+                and baseline_valid
+            ),
             "signature_valid": signature_valid,
             "audit_event_valid": audit_event_valid,
             "audit_chain_valid": audit_chain_valid,
+            "baseline_valid": baseline_valid,
             "receipt_id": parsed.draft.receipt_id,
             "receipt_hash": parsed.receipt_hash,
         }
+
+    def _baseline_valid(
+        self,
+        baseline: BaselineBinding | GenesisMarker,
+        *,
+        lineage_hash: str,
+        current_audit_seq: int | None = None,
+    ) -> bool:
+        if isinstance(baseline, GenesisMarker):
+            return not self._earlier_lineage_receipt_exists(
+                lineage_hash,
+                before_seq=current_audit_seq,
+            )
+        if current_audit_seq is not None and baseline.audit_seq >= current_audit_seq:
+            return False
+        row = self.heartwood.store.audit_row(baseline.audit_seq)
+        if row is None:
+            return False
+        try:
+            body = json.loads(row["body"])
+        except (TypeError, json.JSONDecodeError):
+            return False
+        return (
+            row["tenant"] == self.heartwood.tenant
+            and row["action"] == ROTATION_RECEIPT_AUDIT_ACTION
+            and row["target"] == baseline.receipt_id
+            and body.get("detail", {}).get("receipt_hash") == baseline.receipt_hash
+        )
+
+    def _earlier_lineage_receipt_exists(
+        self,
+        lineage_hash: str,
+        *,
+        before_seq: int | None,
+    ) -> bool:
+        for row in self.heartwood.store.iter_audit():
+            if before_seq is not None and row["seq"] >= before_seq:
+                continue
+            if row["action"] != ROTATION_RECEIPT_AUDIT_ACTION:
+                continue
+            try:
+                detail = json.loads(row["body"]).get("detail", {})
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if detail.get("lineage_hash") == lineage_hash:
+                return True
+        return False
+
+    @staticmethod
+    def _route_lineage_hash(draft: RotationReceiptDraft) -> str:
+        return content_hash(
+            {
+                "from_route": draft.from_route,
+                "to_route": draft.to_route,
+            }
+        )
 
     def _require_admin(self, principal: Principal) -> None:
         if not isinstance(principal, Principal):
@@ -229,7 +323,7 @@ class Continuity:
         ):
             raise PermissionError("continuity access denied")
 
-    def _require_stored_binding(self, binding: ContractBinding) -> None:
+    def _resolve_stored_binding(self, binding: ContractBinding) -> ContractBinding:
         for meta in self.heartwood.store.candidate_meta(self.heartwood.tenant):
             if not self._is_contract_meta(meta):
                 continue
@@ -238,12 +332,92 @@ class Continuity:
             except ContinuityIntegrityError:
                 continue
             if (
-                contract.route_id == binding.route_id
-                and contract.schema_version == binding.schema_version
+                contract.schema_version == binding.schema_version
                 and contract.contract_hash == binding.contract_hash
             ):
-                return
+                return ContractBinding(
+                    route_id=contract.route_id,
+                    schema_version=contract.schema_version,
+                    contract_hash=contract.contract_hash,
+                )
         raise ContinuityIntegrityError("rotation receipt contract binding not found")
+
+    def _mint_contract_routes(
+        self,
+        contract: CapabilityContract,
+    ) -> CapabilityContract:
+        value = contract.to_dict()
+        value["route_id"] = self._canonical_route_id(contract.route_id)
+        for policy in value["fallback"].values():
+            policy["target_route_id"] = self._canonical_route_id(
+                policy["target_route_id"]
+            )
+        return CapabilityContract.from_dict(value)
+
+    def _mint_receipt_ids(
+        self,
+        draft: RotationReceiptDraft,
+    ) -> RotationReceiptDraft:
+        from_binding = self._resolve_stored_binding(draft.from_contract)
+        to_binding = self._resolve_stored_binding(draft.to_contract)
+        value = draft.to_dict()
+        route_aliases = {
+            draft.from_route: from_binding.route_id,
+            draft.from_contract.route_id: from_binding.route_id,
+            draft.to_route: to_binding.route_id,
+            draft.to_contract.route_id: to_binding.route_id,
+        }
+        value["receipt_id"] = self._boundary_id("rot_")
+        value["run_id"] = self._boundary_id("run_")
+        value["from_route"] = from_binding.route_id
+        value["to_route"] = to_binding.route_id
+        value["from_contract"] = from_binding.to_dict()
+        value["to_contract"] = to_binding.to_dict()
+        for case in value["cases"]:
+            case["case_id"] = self._boundary_id("case_")
+            fallback = case["fallback"]
+            if fallback["attempted"]:
+                fallback["target_route_id"] = self._issued_route_id(
+                    fallback["target_route_id"],
+                    route_aliases,
+                )
+        return RotationReceiptDraft.from_dict(value)
+
+    def _canonical_route_id(self, caller_id: str) -> str:
+        existing = self._route_aliases.get(caller_id)
+        if existing is not None:
+            return existing
+        if caller_id in self._stored_route_ids():
+            self._route_aliases[caller_id] = caller_id
+            return caller_id
+        minted = self._boundary_id("route_")
+        self._route_aliases[caller_id] = minted
+        return minted
+
+    def _issued_route_id(
+        self,
+        caller_id: str,
+        route_aliases: Mapping[str, str],
+    ) -> str:
+        resolved = route_aliases.get(caller_id) or self._route_aliases.get(caller_id)
+        if resolved is None or resolved not in set(route_aliases.values()):
+            raise ContinuityIntegrityError("fallback route binding not found")
+        return resolved
+
+    def _stored_route_ids(self) -> set[str]:
+        route_ids: set[str] = set()
+        for meta in self.heartwood.store.candidate_meta(self.heartwood.tenant):
+            if not self._is_contract_meta(meta):
+                continue
+            try:
+                route_ids.add(self._contract_from_meta(meta).route_id)
+            except ContinuityIntegrityError:
+                continue
+        return route_ids
+
+    @staticmethod
+    def _boundary_id(prefix: str) -> str:
+        return prefix + secrets.token_hex(16)
 
     def _contract_from_meta(self, meta: dict[str, Any]) -> CapabilityContract:
         content = self.heartwood._read_content_unchecked(meta["id"])
@@ -284,6 +458,7 @@ class Continuity:
             return False
         expected_detail = {
             "receipt_hash": receipt.receipt_hash,
+            "lineage_hash": self._route_lineage_hash(receipt.draft),
             "status": receipt.draft.evidence_mode.value,
         }
         return (

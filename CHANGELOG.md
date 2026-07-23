@@ -15,6 +15,19 @@ All notable changes to `heartwood-memory` are documented here.
   closed toy eval suite against deterministic in-process `ModelRoute` stubs,
   then produces a real signed, audit-bound measured diff with zero live routes.
 
+### Fixed
+- Rotation receipts now require either a first-class signed genesis marker or
+  a prior receipt binding that resolves by id, hash, and audit sequence against
+  the existing verified audit chain. Duplicate genesis receipts for the same
+  route lineage and non-prior audit ordering are rejected.
+- Core receipt issuance now refuses `evidence_mode=production`; only visibly
+  labeled prototype receipts are accepted until a reviewed execution-
+  attestation path exists.
+- Contract storage and receipt issuance now mint route, receipt, run, and case
+  ids from random bytes. Provider/model labels must resolve through a small
+  static approved list; caller aliases and unapproved labels do not enter
+  canonical artifacts.
+
 ## [0.2.4] - 2026-07-23
 
 ### Added
