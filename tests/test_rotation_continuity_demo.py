@@ -115,11 +115,21 @@ def test_rotation_continuity_stub_contract():
         assert mcp_receipt["configured_environment_keys"] == (
             expected_environment_keys
         )
+        assert mcp_receipt["exec_input_environment_keys"] == (
+            expected_environment_keys
+        )
         assert mcp_receipt["effective_server_environment_keys"] == (
             expected_environment_keys
         )
+        assert set(mcp_receipt["platform_runtime_environment_keys_removed"]) <= {
+            "LC_CTYPE",
+            "__CF_USER_TEXT_ENCODING",
+        }
+        assert mcp_receipt["unexpected_post_start_environment_keys"] == []
         assert mcp_receipt["effective_environment_matches_allowlist"] is True
-        assert mcp_receipt["environment_reset"] == "python_os_execve_exact"
+        assert mcp_receipt["environment_reset"] == (
+            "post_start_sanitize_before_server_init"
+        )
 
 
 def test_route_environment_is_allowlisted(monkeypatch, tmp_path):

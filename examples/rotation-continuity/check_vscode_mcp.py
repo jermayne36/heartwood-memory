@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import json
 import os
+import runpy
 import sys
 import tempfile
 from pathlib import Path
@@ -18,6 +19,10 @@ MCP_SERVER_ENV_KEYS = (
     "HEARTWOOD_MCP_ALLOWED_TOOLS",
     "HEARTWOOD_TENANT",
     "PYTHONPATH",
+)
+PLATFORM_RUNTIME_ENV_KEYS = (
+    "LC_CTYPE",
+    "__CF_USER_TEXT_ENCODING",
 )
 
 
@@ -69,9 +74,12 @@ async def run_check(args: argparse.Namespace) -> dict[str, Any]:
                     },
                 )
                 recall_payload = _tool_payload(recall)
-        effective_environment_keys = json.loads(
+        environment_probe = json.loads(
             environment_receipt.read_text(encoding="utf-8")
         )
+        effective_environment_keys = environment_probe[
+            "effective_server_environment_keys"
+        ]
 
     expected_tools = ["explain_recall", "health", "recall"]
     result_ids = sorted(row["id"] for row in recall_payload["results"])
@@ -85,8 +93,18 @@ async def run_check(args: argparse.Namespace) -> dict[str, Any]:
         "command": str(Path(args.python).expanduser().resolve()),
         "args": [str(ROOT / "examples" / "rotation-continuity" / "mcp_server.py")],
         "configured_environment_keys": sorted(configured_env),
+        "exec_input_environment_keys": sorted(configured_env),
+        "post_start_environment_keys_before_sanitize": environment_probe[
+            "post_start_environment_keys_before_sanitize"
+        ],
+        "platform_runtime_environment_keys_removed": environment_probe[
+            "platform_runtime_environment_keys_removed"
+        ],
         "effective_server_environment_keys": effective_environment_keys,
-        "environment_reset": "python_os_execve_exact",
+        "unexpected_post_start_environment_keys": environment_probe[
+            "unexpected_post_start_environment_keys"
+        ],
+        "environment_reset": "post_start_sanitize_before_server_init",
         "effective_environment_matches_allowlist": (
             effective_environment_keys == sorted(MCP_SERVER_ENV_KEYS)
         ),
@@ -128,18 +146,52 @@ def _tool_payload(result: Any) -> dict[str, Any]:
 
 def _launch_server(environment_receipt: Path) -> int:
     effective_env = {key: os.environ[key] for key in MCP_SERVER_ENV_KEYS}
+    launcher = Path(__file__).resolve()
+    os.execve(
+        sys.executable,
+        [
+            sys.executable,
+            str(launcher),
+            "--serve-and-probe",
+            str(environment_receipt),
+        ],
+        effective_env,
+    )
+    raise AssertionError("os.execve returned unexpectedly")
+
+
+def _serve_and_probe(environment_receipt: Path) -> int:
+    before_sanitize = sorted(os.environ)
+    removed = sorted(
+        key for key in PLATFORM_RUNTIME_ENV_KEYS if os.environ.pop(key, None) is not None
+    )
+    effective = sorted(os.environ)
+    unexpected = sorted(set(effective) - set(MCP_SERVER_ENV_KEYS))
     environment_receipt.write_text(
-        json.dumps(sorted(effective_env)),
+        json.dumps(
+            {
+                "post_start_environment_keys_before_sanitize": before_sanitize,
+                "platform_runtime_environment_keys_removed": removed,
+                "effective_server_environment_keys": effective,
+                "unexpected_post_start_environment_keys": unexpected,
+            }
+        ),
         encoding="utf-8",
     )
+    if effective != sorted(MCP_SERVER_ENV_KEYS):
+        raise AssertionError(
+            "effective MCP server environment does not match the reviewed allowlist"
+        )
     server = ROOT / "examples" / "rotation-continuity" / "mcp_server.py"
-    os.execve(sys.executable, [sys.executable, str(server)], effective_env)
-    raise AssertionError("os.execve returned unexpectedly")
+    runpy.run_path(str(server), run_name="__main__")
+    return 0
 
 
 def main() -> int:
     if len(sys.argv) == 3 and sys.argv[1] == "--launch-server":
         return _launch_server(Path(sys.argv[2]).expanduser().resolve())
+    if len(sys.argv) == 3 and sys.argv[1] == "--serve-and-probe":
+        return _serve_and_probe(Path(sys.argv[2]).expanduser().resolve())
     args = parse_args()
     receipt = asyncio.run(run_check(args))
     rendered = json.dumps(receipt, indent=2, sort_keys=True) + "\n"
