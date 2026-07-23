@@ -4,6 +4,8 @@ All notable changes to `heartwood-memory` are documented here.
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-07-23
+
 ### Added
 - Opt-in strict provenance enforcement with `StrictMode.OFF`, `FILTER`, and `ENFORCE`. FILTER returns fewer than `k` and records reason buckets; ENFORCE raises before any recall result or explanation is returned.
 - `heartwood strict-preflight` scans every stored row into reconciled terminal buckets, identifies unverifiable operator trust-import candidates, and can seal and activate an exact operator-approved cutover snapshot.
