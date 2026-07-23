@@ -68,7 +68,7 @@ adapter. VS Code prompts for:
 Start the server from **MCP: List Servers**, review the command, and approve the
 workspace server trust prompt. Then enable the Heartwood `recall`,
 `explain_recall`, and `health` tools in agent chat. See the
-[VS Code + Copilot guide](../../docs/integrations/vscode-copilot.md).
+(guide forthcoming).
 
 Before opening VS Code, exercise the exact stdio command and read-only tool set:
 
@@ -101,7 +101,7 @@ each run.
 
 ## Security boundary
 
-Read [ADMIN-SECURITY.md](ADMIN-SECURITY.md) before using the demo with a customer.
+Read (guide forthcoming) before using the demo with a customer.
 Use synthetic data only. Heartwood is managed-key and decrypts in the local
 server to serve recall. Signed provenance is re-verified and surfaced rather
 than enforced as a hard read failure today. The audit chain detects edits or
