@@ -144,6 +144,41 @@ Each mechanism appends one row to the hash-chained audit log, so the question
 db.verify_audit()      # the chain still verifies after any of them
 ```
 
+## Authorization
+
+Who may call each retirement verb, as of this release:
+
+| Verb | Caller model | Requires a role? |
+| --- | --- | --- |
+| `db.transition_review` | role-bearing `Principal` (`reviewer` / `approver`) | yes |
+| `db.expire` | `actor` string | no |
+| `db.set_indexed` | `actor` string | no |
+| `db.purge` | `actor` string | no |
+| `db.forget` | `actor` string | no |
+
+`expire`, `set_indexed`, `forget`, and `purge` take a free-text `actor` and are
+not role-gated; `transition_review` and `approve` require a principal with a
+role. This is a deliberate, documented position, not an oversight:
+
+- The `actor` field is **audit attribution, not an authentication boundary.**
+  None of these verbs are reachable over the network: the MCP/HTTP surface is a
+  static, fail-closed allowlist (`recall`, `explain_recall`, `health`) with no
+  delegation to the client, so every retirement verb is in-process only, invoked
+  by code already trusted to open the store.
+- Role-gating only the reversible, preservation-safe verbs (`expire`,
+  `set_indexed`) while leaving the destructive ones (`forget`, `purge`) open
+  would invert the risk gradient — gating the safe operations and not the
+  irreversible ones.
+- The audit event carries the `actor` and the before/after change on every call,
+  so *who* retired a record and *what* changed are always on the tamper-evident
+  log, whether or not `reason` was supplied.
+
+Standardizing one authorization model across all five verbs — role-gate them
+all, or accept actor-string attribution deliberately — is a cross-cutting change
+tracked separately from this release. Until it lands, treat the `actor` string as
+a truthful, non-repudiable label supplied by trusted in-process code, and prefer
+a meaningful `reason` on any verb that removes a record from recall.
+
 ## Direct column writes are a policy violation
 
 `indexed` and `valid_until` decide whether a stored record still answers "what is

@@ -53,7 +53,7 @@ verification raises a non-zero exit.
 
 ## PyPI Publication
 
-`heartwood-memory` is published on PyPI at version `0.2.2`.
+`heartwood-memory` is published on PyPI at version `0.2.3`.
 
 Buyer install:
 
