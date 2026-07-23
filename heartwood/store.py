@@ -69,6 +69,7 @@ _MEMORY_META_COLUMNS = (
 
 class Store:
     def __init__(self, path: str = ":memory:"):
+        self.path = str(path)
         self.conn = sqlite3.connect(path, timeout=30.0)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA busy_timeout=30000")
@@ -502,6 +503,51 @@ class Store:
             raise RuntimeError("Heartwood store is missing its chain_id")
         return str(row["value"])
 
+    def anchor_sink_head(self, sink_id: str) -> str | None:
+        key = "anchor_sink_head:" + hashlib.sha256(sink_id.encode("utf-8")).hexdigest()
+        row = self.conn.execute(
+            "SELECT value FROM store_metadata WHERE key=?",
+            (key,),
+        ).fetchone()
+        return None if row is None else str(row["value"])
+
+    def set_anchor_sink_head(self, sink_id: str, record_digest: str) -> None:
+        key = "anchor_sink_head:" + hashlib.sha256(sink_id.encode("utf-8")).hexdigest()
+        self.conn.execute(
+            "INSERT OR REPLACE INTO store_metadata (key,value) VALUES (?,?)",
+            (key, record_digest),
+        )
+        self.conn.commit()
+
+    def anchor_failure(self, sink_id: str) -> dict | None:
+        key = "anchor_failure:" + hashlib.sha256(sink_id.encode("utf-8")).hexdigest()
+        row = self.conn.execute(
+            "SELECT value FROM store_metadata WHERE key=?",
+            (key,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            value = json.loads(row["value"])
+        except (TypeError, ValueError):
+            return {"error_class": "MalformedAnchorFailureReceipt"}
+        return value if isinstance(value, dict) else {
+            "error_class": "MalformedAnchorFailureReceipt"
+        }
+
+    def set_anchor_failure(self, sink_id: str, receipt: dict) -> None:
+        key = "anchor_failure:" + hashlib.sha256(sink_id.encode("utf-8")).hexdigest()
+        self.conn.execute(
+            "INSERT OR REPLACE INTO store_metadata (key,value) VALUES (?,?)",
+            (key, json.dumps(receipt, sort_keys=True, separators=(",", ":"))),
+        )
+        self.conn.commit()
+
+    def clear_anchor_failure(self, sink_id: str) -> None:
+        key = "anchor_failure:" + hashlib.sha256(sink_id.encode("utf-8")).hexdigest()
+        self.conn.execute("DELETE FROM store_metadata WHERE key=?", (key,))
+        self.conn.commit()
+
     def audit_head(self) -> dict:
         row = self.conn.execute(
             "SELECT seq,row_hash,prev_hash FROM audit_log ORDER BY seq DESC LIMIT 1"
@@ -512,6 +558,25 @@ class Store:
             "seq": int(row["seq"]),
             "row_hash": str(row["row_hash"]),
             "prev_hash": str(row["prev_hash"]),
+        }
+
+    def audit_head_snapshot(self) -> dict:
+        """Capture seq, hash, previous hash, and time from one exact head row."""
+        row = self.conn.execute(
+            "SELECT seq,row_hash,prev_hash,ts FROM audit_log ORDER BY seq DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return {
+                "seq": 0,
+                "row_hash": "genesis",
+                "prev_hash": None,
+                "ts": None,
+            }
+        return {
+            "seq": int(row["seq"]),
+            "row_hash": str(row["row_hash"]),
+            "prev_hash": str(row["prev_hash"]),
+            "ts": float(row["ts"]),
         }
 
     def audit_row(self, seq: int) -> dict | None:

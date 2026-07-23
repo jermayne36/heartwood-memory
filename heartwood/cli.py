@@ -7,11 +7,13 @@ import os
 import sys
 from pathlib import Path
 
+from .anchors import LocalFileAnchorSink, verify_chain_against_anchors
 from .client import Heartwood
 from .importers.edges import import_edges
 from .importers.markdown import dev_models, import_markdown_corpus
 from .key_custody import LocalKmsCustodian, root_to_b64
 from .recall_service import RecallEngine, call_recall_service, call_forget_service, serve_recall
+from .store import Store
 
 
 def _env_bool(name: str, default: bool = True) -> bool:
@@ -258,6 +260,15 @@ def cmd_strict_preflight(args: argparse.Namespace) -> dict:
     embedder = reranker = None
     if args.dev_models:
         embedder, reranker = dev_models()
+    anchor_sink = (
+        LocalFileAnchorSink(args.anchors, sink_id=args.anchor_sink_id)
+        if args.anchors
+        else None
+    )
+    anchor_roots = (
+        args.anchor_root_fingerprint
+        or os.environ.get("HEARTWOOD_ANCHOR_ROOT_FINGERPRINT")
+    )
     db = Heartwood(
         path=args.db,
         tenant=args.tenant,
@@ -266,6 +277,8 @@ def cmd_strict_preflight(args: argparse.Namespace) -> dict:
         index=args.index,
         strict_signatures="off",
         strict_legacy_exemption="off",
+        anchor_sink=anchor_sink,
+        anchor_root_fingerprints=anchor_roots,
     )
     try:
         if args.activate:
@@ -275,10 +288,10 @@ def cmd_strict_preflight(args: argparse.Namespace) -> dict:
             manifest_digest = args.manifest_digest or os.environ.get(
                 "HEARTWOOD_STRICT_CUTOVER_DIGEST"
             )
-            if not manifest_path or not manifest_digest:
+            if not manifest_path or (anchor_sink is None and not manifest_digest):
                 raise ValueError(
-                    "strict-preflight --activate requires --manifest and "
-                    "--manifest-digest (or the matching HEARTWOOD_STRICT_* env vars)"
+                    "strict-preflight --activate requires --manifest and either "
+                    "--anchors or --manifest-digest"
                 )
             return db.activate_strict_cutover(
                 manifest_path=str(manifest_path),
@@ -303,6 +316,29 @@ def cmd_strict_preflight(args: argparse.Namespace) -> dict:
         return db.strict_preflight()
     finally:
         db.close()
+
+
+def cmd_verify_audit(args: argparse.Namespace) -> dict:
+    roots = (
+        args.anchor_root_fingerprint
+        or os.environ.get("HEARTWOOD_ANCHOR_ROOT_FINGERPRINT")
+    )
+    if not roots:
+        raise ValueError(
+            "verify-audit requires --anchor-root-fingerprint or "
+            "HEARTWOOD_ANCHOR_ROOT_FINGERPRINT"
+        )
+    store = Store(args.db)
+    try:
+        return verify_chain_against_anchors(
+            store,
+            LocalFileAnchorSink(args.anchors, sink_id=args.anchor_sink_id),
+            trusted_root_fingerprints=roots,
+            interval_s=args.interval_s,
+            every_n_rows=args.every_n_rows,
+        )
+    finally:
+        store.close()
 
 
 def cmd_bench_recall(args: argparse.Namespace) -> dict:
@@ -674,10 +710,56 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--manifest-digest",
         help="Exact sha256:<hex> operator-config pin for --manifest.",
     )
+    strict.add_argument(
+        "--anchors",
+        type=Path,
+        help="Local AnchorSink JSONL path; preferred manifest-digest pin source.",
+    )
+    strict.add_argument(
+        "--anchor-sink-id",
+        help="Stable sink identity; defaults to a digest of the resolved local path.",
+    )
+    strict.add_argument(
+        "--anchor-root-fingerprint",
+        action="append",
+        help="Externally pinned sha256 fingerprint; repeat to retain historical roots.",
+    )
     strict.add_argument("--dev-models", action="store_true")
     strict.add_argument("--index", default="numpy", choices=("numpy", "auto", "sqlite-vec"))
     strict.add_argument("--output", type=Path)
     strict.set_defaults(handler=cmd_strict_preflight)
+
+    verify_audit = subparsers.add_parser(
+        "verify-audit",
+        help="Verify the hash chain and fail-closed signed local AnchorSink receipts.",
+    )
+    verify_audit.add_argument(
+        "--db", type=Path, required=True, help="Target Heartwood SQLite database."
+    )
+    verify_audit.add_argument(
+        "--anchors", type=Path, required=True, help="Local AnchorSink JSONL path."
+    )
+    verify_audit.add_argument(
+        "--anchor-sink-id",
+        help="Stable sink identity; defaults to a digest of the resolved local path.",
+    )
+    verify_audit.add_argument(
+        "--anchor-root-fingerprint",
+        action="append",
+        help="Externally pinned sha256 fingerprint; repeat to retain historical roots.",
+    )
+    verify_audit.add_argument(
+        "--interval-s",
+        type=float,
+        default=float(os.environ.get("HEARTWOOD_ANCHOR_INTERVAL_S", "300")),
+    )
+    verify_audit.add_argument(
+        "--every-n-rows",
+        type=int,
+        default=int(os.environ.get("HEARTWOOD_ANCHOR_EVERY_N_ROWS", "1000")),
+    )
+    verify_audit.add_argument("--output", type=Path)
+    verify_audit.set_defaults(handler=cmd_verify_audit)
 
     bench = subparsers.add_parser(
         "bench-recall",
@@ -709,6 +791,8 @@ def main(argv: list[str] | None = None) -> None:
         print(f"heartwood error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
     write_output(args, payload)
+    if args.handler is cmd_verify_audit and payload.get("ok") is not True:
+        raise SystemExit(2)
     if (
         isinstance(payload, dict)
         and int(payload.get("failed_count") or 0) > 0

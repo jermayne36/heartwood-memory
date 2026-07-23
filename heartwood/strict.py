@@ -142,10 +142,20 @@ def strict_failure_reason(
 class StrictCutoverResolver:
     """Pinned, activated cutover allowlist used only after live verification fails."""
 
-    def __init__(self, store, path: str | Path, expected_digest: str):
+    def __init__(
+        self,
+        store,
+        path: str | Path,
+        expected_digest: str | None,
+        *,
+        anchor_writer=None,
+    ):
         self.store = store
         self.path = Path(path)
-        self.expected_digest = _validated_digest(expected_digest)
+        self.expected_digest = (
+            _validated_digest(expected_digest) if expected_digest is not None else None
+        )
+        self.anchor_writer = anchor_writer
         self.manifest: dict[str, Any] = {}
         self.by_id: dict[str, dict[str, str]] = {}
         self._file_identity: tuple[int, int, int, int] | None = None
@@ -198,11 +208,26 @@ class StrictCutoverResolver:
     def _reload(self) -> None:
         raw, identity = _read_once(self.path)
         actual_digest = _digest_bytes(raw)
-        if actual_digest != self.expected_digest:
-            raise StrictConfigurationError(
-                "strict cutover manifest digest does not match the operator-config pin"
+        if self.anchor_writer is None:
+            expected_digest = self.expected_digest
+            if expected_digest is not None and actual_digest != expected_digest:
+                raise StrictConfigurationError(
+                    "strict cutover manifest digest does not match its trusted pin"
+                )
+            manifest = parse_strict_cutover_manifest(raw)
+        else:
+            manifest = parse_strict_cutover_manifest(raw)
+            expected_digest = self.anchor_writer.resolve_manifest_digest(
+                manifest["manifest_id"]
             )
-        manifest = parse_strict_cutover_manifest(raw)
+        if expected_digest is None:
+            raise StrictConfigurationError(
+                "strict cutover manifest has no AnchorSink or operator-config digest pin"
+            )
+        if actual_digest != expected_digest:
+            raise StrictConfigurationError(
+                "strict cutover manifest digest does not match its trusted pin"
+            )
         if not verify_strict_cutover_manifest_signature(manifest):
             raise StrictConfigurationError("strict cutover manifest signature is invalid")
         _validate_manifest_activation(self.store, manifest, actual_digest)
@@ -214,10 +239,11 @@ class StrictCutoverResolver:
 class StrictCutoverManager:
     """Preflight, seal, and activate a store-global strict cutover."""
 
-    def __init__(self, *, store, key_store, cipher):
+    def __init__(self, *, store, key_store, cipher, anchor_writer=None):
         self.store = store
         self.key_store = key_store
         self.cipher = cipher
+        self.anchor_writer = anchor_writer
 
     def preflight(self) -> dict[str, Any]:
         try:
@@ -323,6 +349,20 @@ class StrictCutoverManager:
             readback, _identity = _read_once(path)
             if readback != raw or _digest_bytes(readback) != manifest_digest:
                 raise RuntimeError("strict cutover artifact failed read-back verification")
+            pin_receipt = (
+                self.anchor_writer.pin_manifest(manifest_id, manifest_digest)
+                if self.anchor_writer is not None
+                else {
+                    "pin_source": "operator_config",
+                    "manifest_id": manifest_id,
+                    "manifest_digest": manifest_digest,
+                }
+            )
+            anchor_receipt = (
+                self.anchor_writer.anchor()
+                if self.anchor_writer is not None
+                else None
+            )
             return {
                 "ok": True,
                 "status": "sealed_not_active",
@@ -332,6 +372,8 @@ class StrictCutoverManager:
                 "candidate_report_digest": report["report_digest"],
                 "exempt_count": manifest["exempt_count"],
                 "seal_transition": transition,
+                "pin": pin_receipt,
+                "anchor": anchor_receipt,
             }
         except Exception:
             if self.store.conn.in_transaction:
@@ -344,7 +386,7 @@ class StrictCutoverManager:
         self,
         *,
         manifest_path: str | Path,
-        manifest_digest: str,
+        manifest_digest: str | None,
         operator: str,
     ) -> dict[str, Any]:
         _require_operator(operator)
@@ -352,13 +394,17 @@ class StrictCutoverManager:
             StrictMode.ENFORCE,
             self.key_store.custodian,
         )
-        expected_digest = _validated_digest(manifest_digest)
         raw, _identity = _read_once(Path(manifest_path))
+        manifest = parse_strict_cutover_manifest(raw)
+        expected_digest = (
+            self.anchor_writer.resolve_manifest_digest(manifest["manifest_id"])
+            if self.anchor_writer is not None
+            else _validated_digest(manifest_digest or "")
+        )
         if _digest_bytes(raw) != expected_digest:
             raise StrictConfigurationError(
-                "strict cutover manifest digest does not match the operator-config pin"
+                "strict cutover manifest digest does not match its trusted pin"
             )
-        manifest = parse_strict_cutover_manifest(raw)
         if not verify_strict_cutover_manifest_signature(manifest):
             raise StrictConfigurationError("strict cutover manifest signature is invalid")
 
@@ -372,7 +418,7 @@ class StrictCutoverManager:
             existing_activation = transitions.get("activation")
             if existing_activation is not None:
                 self.store.conn.commit()
-                return {
+                result = {
                     "ok": True,
                     "status": "already_active",
                     "manifest_id": manifest["manifest_id"],
@@ -380,6 +426,12 @@ class StrictCutoverManager:
                     "seal_transition": transitions["seal"],
                     "activation_transition": existing_activation,
                 }
+                if self.anchor_writer is not None:
+                    result["anchor"] = self.anchor_writer.anchor()
+                    result["pin_source"] = "anchor_sink"
+                else:
+                    result["pin_source"] = "operator_config"
+                return result
 
             seal = transitions["seal"]
             if self.store.audit_head() != {
@@ -423,7 +475,7 @@ class StrictCutoverManager:
                     "strict cutover activation did not extend the exact seal transition"
                 )
             self.store.conn.commit()
-            return {
+            result = {
                 "ok": True,
                 "status": "active",
                 "manifest_id": manifest["manifest_id"],
@@ -431,6 +483,12 @@ class StrictCutoverManager:
                 "seal_transition": seal,
                 "activation_transition": activation,
             }
+            if self.anchor_writer is not None:
+                result["anchor"] = self.anchor_writer.anchor()
+                result["pin_source"] = "anchor_sink"
+            else:
+                result["pin_source"] = "operator_config"
+            return result
         except Exception:
             self.store.conn.rollback()
             raise
@@ -460,6 +518,29 @@ class StrictCutoverManager:
             if record["reason"] in _CANDIDATE_BUCKETS
         ]
         candidates.sort(key=lambda item: (item["tenant"], item["id"]))
+        anchor_status = (
+            self.anchor_writer.verify()
+            if self.anchor_writer is not None
+            else {"ok": False, "anchor_status": "not_configured"}
+        )
+        stable_anchor_status = {
+            key: anchor_status.get(key)
+            for key in (
+                "ok",
+                "anchor_status",
+                "chain_ok",
+                "anchors_ok",
+                "anchor_fresh",
+                "sink_healthy",
+                "last_success_seq",
+                "current_seq",
+                "rows_since_success",
+                "anchor_due",
+                "first_failure",
+                "last_sanitized_error_class",
+            )
+            if key in anchor_status
+        }
         body = {
             "domain": _REPORT_DOMAIN,
             "schema_version": 1,
@@ -474,7 +555,7 @@ class StrictCutoverManager:
             "records": records,
             "trust_import_candidates": candidates,
             "chain_ok": AuditLog(self.store).verify_chain(),
-            "anchor_status": "not_configured",
+            "anchor_status": stable_anchor_status,
             "prior_deletion_completeness": "not_established_without_earlier_external_anchor",
         }
         report_digest = _digest_bytes(_canonical_bytes(body))
