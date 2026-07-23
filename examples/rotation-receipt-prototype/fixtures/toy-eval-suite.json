@@ -1,0 +1,48 @@
+{
+  "schema_version": "1",
+  "eval_suite_id": "suite_bet3pilot000001",
+  "cases": [
+    {
+      "case_id": "case_bet3steady00001",
+      "prompt_id": "prompt_bet3steady001",
+      "from_stub": {
+        "behavior": "return",
+        "outcome": "pass",
+        "score": 1.0
+      },
+      "to_stub": {
+        "behavior": "return",
+        "outcome": "pass",
+        "score": 1.0
+      }
+    },
+    {
+      "case_id": "case_bet3degrade0001",
+      "prompt_id": "prompt_bet3degrade01",
+      "from_stub": {
+        "behavior": "return",
+        "outcome": "pass",
+        "score": 0.9
+      },
+      "to_stub": {
+        "behavior": "return",
+        "outcome": "degraded",
+        "score": 0.7
+      }
+    },
+    {
+      "case_id": "case_bet3timeout0001",
+      "prompt_id": "prompt_bet3timeout01",
+      "from_stub": {
+        "behavior": "return",
+        "outcome": "pass",
+        "score": 1.0
+      },
+      "to_stub": {
+        "behavior": "timeout",
+        "outcome": "failed",
+        "score": 0.0
+      }
+    }
+  ]
+}

@@ -11,6 +11,9 @@ All notable changes to `heartwood-memory` are documented here.
 - Closed receipt validation for opaque identifiers, bounded deltas, fixed error
   categories, observed fallbacks, prior baseline/eval/contract hashes, and
   machine-readable production or prototype status.
+- A visibly labeled rotation-receipt prototype under `examples/` that runs a
+  closed toy eval suite against deterministic in-process `ModelRoute` stubs,
+  then produces a real signed, audit-bound measured diff with zero live routes.
 
 ## [0.2.4] - 2026-07-23
 
