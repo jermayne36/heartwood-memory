@@ -58,11 +58,12 @@ local structured-output API with no tools.
 
 - Heartwood is managed-key; its local process decrypts authorized content to
   serve recall.
-- This demo runs with strict provenance enforcement off: signature validity is
-  re-verified and surfaced on each result. The opt-in `StrictMode` `FILTER` and
-  `ENFORCE` read-failure modes shipped in 0.2.4 require an operator-approved
-  cutover and are not enabled here. Strict mode authenticates the signed
-  provenance payload and content hash, not authorization metadata.
+- The demo does not explicitly enable strict provenance enforcement. With
+  `HEARTWOOD_STRICT_SIGNATURES` unset, Heartwood defaults to `OFF`, re-verifying
+  and surfacing signature state; operators can opt into the `FILTER` or
+  `ENFORCE` read-failure modes shipped in 0.2.4 via an operator-approved
+  cutover. Strict mode authenticates the signed provenance payload and content
+  hash, not authorization metadata.
 - The current chain detects changes to the hash-bound event body or timestamp
   and detects a dropped interior row. Opt-in external anchoring and the
   `heartwood verify-audit` receipt CLI shipped in 0.2.4; this demo does not
