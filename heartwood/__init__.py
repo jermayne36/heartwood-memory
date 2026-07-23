@@ -12,6 +12,16 @@ novel retrieval mechanism (spreading activation was CUT).
                     principal=Principal(id="agent:asst", tenant="tenant:acme"))
 """
 from .client import Heartwood
+from .anchors import (
+    AnchorConfigurationError,
+    AnchorError,
+    AnchorSink,
+    AnchorSinkError,
+    AnchorWriteError,
+    LocalFileAnchorSink,
+    anchor_root_fingerprint,
+    verify_chain_against_anchors,
+)
 from .egress import DENIED, EXTERNAL_ALLOWED, EXTERNAL_REDACTED, HUMAN_REVIEW, LOCAL_ONLY
 from .envelope import Epistemic, Kind, Memory, Policy, TruthStatus
 from .ergonomics import normalize_tenant, policy_from, principal_from, tenant_slug
@@ -37,6 +47,14 @@ from .strict import (
 
 __all__ = [
     "Heartwood",
+    "AnchorSink",
+    "LocalFileAnchorSink",
+    "AnchorError",
+    "AnchorConfigurationError",
+    "AnchorSinkError",
+    "AnchorWriteError",
+    "anchor_root_fingerprint",
+    "verify_chain_against_anchors",
     "Principal",
     "Policy",
     "Memory",

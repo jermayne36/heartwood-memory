@@ -14,6 +14,7 @@ from collections import Counter, OrderedDict
 from datetime import datetime, timezone
 from typing import Iterable
 
+from .anchors import AnchorSink, AnchorWriter
 from .audit import AuditLog
 from .egress import evaluate_request as evaluate_egress_request, generation_allowed
 from .envelope import CLASSIFICATION_RANK, Epistemic, Memory, Policy, default_truth_status, hash_content
@@ -104,7 +105,11 @@ class Heartwood:
                  strict_signatures: StrictMode | str | None = None,
                  strict_legacy_exemption: str | None = None,
                  strict_cutover_path: str | None = None,
-                 strict_cutover_digest: str | None = None):
+                 strict_cutover_digest: str | None = None,
+                 anchor_sink: AnchorSink | None = None,
+                 anchor_root_fingerprints: str | Iterable[str] | None = None,
+                 anchor_interval_s: float | None = None,
+                 anchor_every_n_rows: int | None = None):
         self.path = str(path)
         self.tenant = str(tenant)
         self._index_spec = index
@@ -125,22 +130,46 @@ class Heartwood:
             if strict_cutover_digest is not None
             else os.environ.get("HEARTWOOD_STRICT_CUTOVER_DIGEST")
         )
+        self._anchor_sink = anchor_sink
+        self._anchor_root_fingerprints = (
+            anchor_root_fingerprints
+            if anchor_root_fingerprints is not None
+            else os.environ.get("HEARTWOOD_ANCHOR_ROOT_FINGERPRINT")
+        )
+        self._anchor_interval_s = anchor_interval_s
+        self._anchor_every_n_rows = anchor_every_n_rows
+        self._anchor_writer = None
         self._strict_cutover = None
         try:
+            if self._anchor_sink is not None:
+                self._anchor_writer = AnchorWriter(
+                    store=self.store,
+                    sink=self._anchor_sink,
+                    custodian=self.keys.custodian,
+                    trusted_root_fingerprints=self._anchor_root_fingerprints or "",
+                    interval_s=self._anchor_interval_s,
+                    every_n_rows=self._anchor_every_n_rows,
+                    background_time_cadence=True,
+                )
             require_durable_strict_custody(self._strict_mode, self.keys.custodian)
             if (
                 self._strict_mode is not StrictMode.OFF
                 and self._strict_legacy_exemption == "manifest"
             ):
-                if not self._strict_cutover_path or not self._strict_cutover_digest:
+                if not self._strict_cutover_path:
                     raise StrictConfigurationError(
-                        "strict manifest mode requires HEARTWOOD_STRICT_CUTOVER_PATH and "
+                        "strict manifest mode requires HEARTWOOD_STRICT_CUTOVER_PATH"
+                    )
+                if self._anchor_writer is None and not self._strict_cutover_digest:
+                    raise StrictConfigurationError(
+                        "strict manifest mode requires an AnchorSink pin or "
                         "HEARTWOOD_STRICT_CUTOVER_DIGEST"
                     )
                 self._strict_cutover = StrictCutoverResolver(
                     self.store,
                     self._strict_cutover_path,
                     self._strict_cutover_digest,
+                    anchor_writer=self._anchor_writer,
                 )
         except Exception:
             self.store.close()
@@ -150,7 +179,14 @@ class Heartwood:
         self._embedder_pair = (self.embedder, self.embedder_name)
         self._reranker_pair = (self.reranker, self.reranker_name)
         self.enforcer = PolicyEnforcer()
-        self.audit = AuditLog(self.store)
+        self.audit = AuditLog(
+            self.store,
+            after_append=(
+                self._anchor_writer.maybe_anchor
+                if self._anchor_writer is not None
+                else None
+            ),
+        )
         self.index = make_index(index, self.store)
         self.index.rebuild(self.store)   # populate from any pre-existing rows
         self._explain: OrderedDict[str, dict] = OrderedDict()
@@ -172,10 +208,18 @@ class Heartwood:
             strict_legacy_exemption=self._strict_legacy_exemption,
             strict_cutover_path=self._strict_cutover_path,
             strict_cutover_digest=self._strict_cutover_digest,
+            anchor_sink=self._anchor_sink,
+            anchor_root_fingerprints=self._anchor_root_fingerprints,
+            anchor_interval_s=self._anchor_interval_s,
+            anchor_every_n_rows=self._anchor_every_n_rows,
         )
 
     def close(self) -> None:
-        self.store.close()
+        try:
+            if self._anchor_writer is not None:
+                self._anchor_writer.close()
+        finally:
+            self.store.close()
 
     def principal(self, id: str = "agent:recall", *, tenant: str | None = None,
                   roles=(), attrs=(), clearance: str = "internal") -> Principal:
@@ -1118,6 +1162,7 @@ class Heartwood:
             store=self.store,
             key_store=self.keys,
             cipher=self.cipher,
+            anchor_writer=self._anchor_writer,
         ).preflight()
 
     def seal_strict_cutover(self, *, approved_report_digest: str,
@@ -1127,6 +1172,7 @@ class Heartwood:
             store=self.store,
             key_store=self.keys,
             cipher=self.cipher,
+            anchor_writer=self._anchor_writer,
         ).seal(
             approved_report_digest=approved_report_digest,
             manifest_path=manifest_path,
@@ -1135,12 +1181,14 @@ class Heartwood:
         )
 
     def activate_strict_cutover(self, *, manifest_path: str,
-                                manifest_digest: str, operator: str) -> dict:
+                                manifest_digest: str | None = None,
+                                operator: str) -> dict:
         """Bind strict activation to the exact seal-event audit transition."""
         return StrictCutoverManager(
             store=self.store,
             key_store=self.keys,
             cipher=self.cipher,
+            anchor_writer=self._anchor_writer,
         ).activate(
             manifest_path=manifest_path,
             manifest_digest=manifest_digest,
@@ -1150,10 +1198,46 @@ class Heartwood:
     def verify_audit(self) -> bool:
         return self.audit.verify_chain()
 
+    def anchor(self) -> dict:
+        """Write and read-back verify the current store-global audit head."""
+        if self._anchor_writer is None:
+            raise StrictConfigurationError("audit anchoring is not configured")
+        return self._anchor_writer.anchor()
+
+    def anchor_status(self) -> dict:
+        """Recompute anchor health from the live database and sink."""
+        if self._anchor_writer is None:
+            return {
+                "ok": False,
+                "anchor_status": "not_configured",
+                "chain_ok": self.verify_audit(),
+            }
+        return self._anchor_writer.verify()
+
+    def verify_chain_against_anchors(self) -> dict:
+        """Return the fail-closed chain + external-anchor verification receipt."""
+        return self.anchor_status()
+
+    def anchor_provisioning(self) -> dict:
+        """Return the chain/signer/sink identities that must be pinned externally."""
+        if self._anchor_writer is None:
+            raise StrictConfigurationError("audit anchoring is not configured")
+        return self._anchor_writer.provisioning_receipt()
+
     def info(self) -> dict:
-        return {"tenant": self.tenant, "embedder": self.embedder_name,
-                "reranker": self.reranker_name, "cipher": self.cipher.name,
-                "index": self.index.name, "key_custody": self.keys.custodian.name}
+        return {
+            "tenant": self.tenant,
+            "embedder": self.embedder_name,
+            "reranker": self.reranker_name,
+            "cipher": self.cipher.name,
+            "index": self.index.name,
+            "key_custody": self.keys.custodian.name,
+            "anchor_status": (
+                self._anchor_writer.verify()["anchor_status"]
+                if self._anchor_writer is not None
+                else "not_configured"
+            ),
+        }
 
     def key_custody_info(self, subject: str) -> dict:
         return self.keys.custody_info(self.tenant, subject)
