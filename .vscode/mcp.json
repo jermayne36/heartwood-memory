@@ -1,0 +1,31 @@
+{
+  "inputs": [
+    {
+      "type": "promptString",
+      "id": "heartwoodPython",
+      "description": "Absolute Python 3.11 executable with Heartwood + MCP installed",
+      "password": false
+    },
+    {
+      "type": "promptString",
+      "id": "heartwoodDemoDb",
+      "description": "Absolute path to the isolated rotation-demo heartwood-demo.db",
+      "password": false
+    }
+  ],
+  "servers": {
+    "heartwood-rotation-demo": {
+      "type": "stdio",
+      "command": "${input:heartwoodPython}",
+      "args": [
+        "${workspaceFolder}/examples/rotation-continuity/mcp_server.py"
+      ],
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}",
+        "HEARTWOOD_DB_PATH": "${input:heartwoodDemoDb}",
+        "HEARTWOOD_TENANT": "tenant:rotation-continuity-demo",
+        "HEARTWOOD_MCP_ALLOWED_TOOLS": "recall,explain_recall,health"
+      }
+    }
+  }
+}
