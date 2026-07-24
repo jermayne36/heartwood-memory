@@ -65,7 +65,7 @@ dev = [
   "mcp>=1",
   "psycopg[binary]>=3.2",
   "pytest>=8",
-  "ruff>=0.15",
+  "ruff>=0.15,<0.16",
   "sqlite-vec>=0.1.6",
 ]
 
