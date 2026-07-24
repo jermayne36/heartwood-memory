@@ -5,12 +5,33 @@ import argparse
 import hashlib
 import json
 import os
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
 
 
-DEFAULT_CACHE_DIR = Path(os.environ.get("HF_HOME", "/opt/heartwood/hf-cache"))
+def _user_cache_home() -> Path:
+    if os.name == "nt":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        return (
+            Path(local_app_data)
+            if local_app_data
+            else Path.home() / "AppData" / "Local"
+        )
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Caches"
+    xdg_cache_home = os.environ.get("XDG_CACHE_HOME")
+    return Path(xdg_cache_home) if xdg_cache_home else Path.home() / ".cache"
+
+
+def _default_cache_dir() -> Path:
+    if "HF_HOME" in os.environ:
+        return Path(os.environ["HF_HOME"])
+    return _user_cache_home() / "heartwood" / "hf"
+
+
+DEFAULT_CACHE_DIR = _default_cache_dir()
 DEFAULT_MANIFEST = DEFAULT_CACHE_DIR / "heartwood-model-manifest.json"
 
 

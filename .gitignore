@@ -13,12 +13,12 @@ node_modules/
 # Local Heartwood runtime state used by .mcp.json and Docker volumes.
 .heartwood/
 
-# Local configuration and credentials.
+# Local configuration and credentials. The root .mcp.json is the tracked,
+# read-only starter template; keep credentials out of it.
 .env*
 .*-credentials*
 .team-token*
 .team-*-token*
-.mcp.json
 /*.token
 *.pem
 *.p8
