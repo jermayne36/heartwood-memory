@@ -14,9 +14,11 @@ def test_root_mcp_template_matches_documented_read_only_default():
 
     assert template == example
     server = template["mcpServers"]["heartwood-memory"]
-    assert server["args"] == ["-m", "heartwood.adapters.mcp_server"]
+    assert server["command"] == "uvx"
+    assert server["args"] == ["heartwood-memory"]
     assert server["env"] == {
         "HEARTWOOD_DB_PATH": ".heartwood/heartwood.db",
         "HEARTWOOD_TENANT": "tenant:ops",
+        "HEARTWOOD_MCP_ALLOWED_TOOLS": "recall,explain_recall,health",
     }
-    assert "HEARTWOOD_MCP_ALLOWED_TOOLS" not in server["env"]
+    assert "/absolute/path/to" not in json.dumps(template)

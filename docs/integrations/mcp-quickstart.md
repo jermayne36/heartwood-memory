@@ -1,34 +1,34 @@
 # MCP Quickstart
 
 This is the Phase 1 B4 path for using Heartwood as a governed MCP memory server.
-The checked-in `.mcp.json` is a template for starting the server from this repo
-and storing local runtime state under `.heartwood/heartwood.db`; replace its
-`command` with your absolute Python interpreter path before using it.
+The checked-in `.mcp.json` runs the published package through `uvx` and stores
+local runtime state under `.heartwood/heartwood.db`. It needs no repository path
+or virtual-environment path.
 
 ## Install
 
-```powershell
-python -m pip install "heartwood-memory[recall,mcp]"
-python -c "import sys; print(sys.executable)"
+```bash
+uvx heartwood-memory
 ```
+
+The first run creates a cached, isolated environment from the published PyPI
+package. Stop the foreground process after it starts; the MCP client launches
+the same command over stdio.
 
 ## Configure
 
-The repo includes a template config. Replace `command` with the absolute
-interpreter path printed during install, such as
-`/Users/alex/project/.venv/bin/python` or
-`C:\Users\alex\project\.venv\Scripts\python.exe`. Avoid bare `python` in MCP
-client configs unless you control the target PATH.
+The repo includes this directly runnable, read-only config:
 
 ```json
 {
   "mcpServers": {
     "heartwood-memory": {
-      "command": "/absolute/path/to/.venv/bin/python",
-      "args": ["-m", "heartwood.adapters.mcp_server"],
+      "command": "uvx",
+      "args": ["heartwood-memory"],
       "env": {
         "HEARTWOOD_DB_PATH": ".heartwood/heartwood.db",
-        "HEARTWOOD_TENANT": "tenant:ops"
+        "HEARTWOOD_TENANT": "tenant:ops",
+        "HEARTWOOD_MCP_ALLOWED_TOOLS": "recall,explain_recall,health"
       }
     }
   }
@@ -38,9 +38,9 @@ client configs unless you control the target PATH.
 Override `HEARTWOOD_DB_PATH` when you want MCP to use the same store built by
 `import-markdown` or `bulk-remember`.
 
-With no `HEARTWOOD_MCP_ALLOWED_TOOLS` set, the base config above exposes only the
-read-only subset (`recall`, `explain_recall`, `health`); see the next section to
-enable write or erasure tools.
+The starter config names only the read-only subset (`recall`, `explain_recall`,
+`health`); see the next section to enable write or erasure tools. If the variable
+is omitted, the server still fails closed to the same subset.
 
 ## Default Exposure Is Fail-Closed
 
@@ -57,8 +57,8 @@ exposed, so an unintended `forget` is visible in logs:
 {
   "mcpServers": {
     "heartwood-memory-write": {
-      "command": "/absolute/path/to/.venv/bin/python",
-      "args": ["-m", "heartwood.adapters.mcp_server"],
+      "command": "uvx",
+      "args": ["heartwood-memory"],
       "env": {
         "HEARTWOOD_DB_PATH": ".heartwood/heartwood.db",
         "HEARTWOOD_TENANT": "tenant:ops",

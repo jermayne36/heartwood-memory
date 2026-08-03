@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
 import tomllib
 from pathlib import Path
 
@@ -34,12 +35,41 @@ def runtime_version(path: Path) -> str:
     return values[0]
 
 
-def assert_versions_match(pyproject_path: Path, init_path: Path) -> str:
+def server_versions(path: Path) -> tuple[str, str]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    manifest = data.get("version")
+    if not isinstance(manifest, str) or not manifest:
+        raise RuntimeError(f"missing top-level version in {path}")
+
+    matching_packages = [
+        item
+        for item in data.get("packages", [])
+        if isinstance(item, dict)
+        and item.get("registryType") == "pypi"
+        and item.get("identifier") == "heartwood-memory"
+    ]
+    if len(matching_packages) != 1:
+        raise RuntimeError(
+            f"expected exactly one PyPI heartwood-memory package in {path}; "
+            f"found {len(matching_packages)}"
+        )
+    package = matching_packages[0].get("version")
+    if not isinstance(package, str) or not package:
+        raise RuntimeError(f"missing PyPI package version in {path}")
+    return manifest, package
+
+
+def assert_versions_match(pyproject_path: Path, init_path: Path, server_path: Path) -> str:
     package = pyproject_version(pyproject_path)
     runtime = runtime_version(init_path)
-    if package != runtime:
+    manifest, registry_package = server_versions(server_path)
+    if len({package, runtime, manifest, registry_package}) != 1:
         raise RuntimeError(
-            f"version drift: pyproject.toml={package!r}, heartwood.__version__={runtime!r}"
+            "version drift: "
+            f"pyproject.toml={package!r}, "
+            f"heartwood.__version__={runtime!r}, "
+            f"server.json.version={manifest!r}, "
+            f"server.json PyPI package={registry_package!r}"
         )
     return package
 
@@ -48,8 +78,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Verify Heartwood package/runtime version consistency.")
     parser.add_argument("--pyproject", type=Path, default=ROOT / "pyproject.toml")
     parser.add_argument("--init", type=Path, default=ROOT / "heartwood" / "__init__.py")
+    parser.add_argument("--server", type=Path, default=ROOT / "server.json")
     args = parser.parse_args()
-    version = assert_versions_match(args.pyproject, args.init)
+    version = assert_versions_match(args.pyproject, args.init, args.server)
     print(f"version guard: OK ({version})")
 
 
