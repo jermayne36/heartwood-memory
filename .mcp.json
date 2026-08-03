@@ -6,7 +6,7 @@
         "heartwood-memory"
       ],
       "env": {
-        "HEARTWOOD_DB_PATH": ".heartwood/heartwood.db",
+        "HEARTWOOD_DB_PATH": "heartwood.db",
         "HEARTWOOD_TENANT": "tenant:ops",
         "HEARTWOOD_MCP_ALLOWED_TOOLS": "recall,explain_recall,health"
       }

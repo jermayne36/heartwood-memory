@@ -2,7 +2,7 @@
 
 This is the Phase 1 B4 path for using Heartwood as a governed MCP memory server.
 The checked-in `.mcp.json` runs the published package through `uvx` and stores
-local runtime state under `.heartwood/heartwood.db`. It needs no repository path
+local runtime state in `heartwood.db`. It needs no repository path
 or virtual-environment path.
 
 ## Install
@@ -26,7 +26,7 @@ The repo includes this directly runnable, read-only config:
       "command": "uvx",
       "args": ["heartwood-memory"],
       "env": {
-        "HEARTWOOD_DB_PATH": ".heartwood/heartwood.db",
+        "HEARTWOOD_DB_PATH": "heartwood.db",
         "HEARTWOOD_TENANT": "tenant:ops",
         "HEARTWOOD_MCP_ALLOWED_TOOLS": "recall,explain_recall,health"
       }
@@ -60,7 +60,7 @@ exposed, so an unintended `forget` is visible in logs:
       "command": "uvx",
       "args": ["heartwood-memory"],
       "env": {
-        "HEARTWOOD_DB_PATH": ".heartwood/heartwood.db",
+        "HEARTWOOD_DB_PATH": "heartwood.db",
         "HEARTWOOD_TENANT": "tenant:ops",
         "HEARTWOOD_MCP_ALLOWED_TOOLS": "recall,explain_recall,remember,health"
       }
