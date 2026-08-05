@@ -8,19 +8,33 @@ endpoint exists, is deployed, and is smoke-tested.
 
 Minimum Codex CLI version for this recipe: `0.141.0`.
 
-## Install Heartwood In A Python Environment
+## Prerequisites
 
-Install Heartwood with the MCP extra in the Python environment you want Codex to
-launch:
+- Python 3.11 or newer, available here as `python3.11`
+- Codex CLI 0.141.0 or newer
+- A fresh clone of this repository, with your shell in the repository root
+
+## Install Heartwood And Create Its Data Directory
+
+Create a repository-local virtual environment, install the checked-out source,
+and create a durable data directory outside the clone:
 
 ```bash
-/absolute/path/to/.venv/bin/python -m pip install "heartwood-memory[recall,mcp]"
-/absolute/path/to/.venv/bin/python -c "import sys; print(sys.executable)"
+python3.11 -m venv .venv
+PYBIN="$PWD/.venv/bin/python"
+"$PYBIN" -m pip install --quiet -e ".[recall,mcp]"
+
+HEARTWOOD_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/heartwood"
+mkdir -p "$HEARTWOOD_DATA_DIR"
+HEARTWOOD_DB_PATH="$HEARTWOOD_DATA_DIR/heartwood.db"
+
+printf 'Python: %s\nDatabase: %s\n' "$PYBIN" "$HEARTWOOD_DB_PATH"
 ```
 
-Use the absolute interpreter path printed by the second command. Do not configure
-Codex with a bare `python`, `python3`, or `python3.11` command unless you fully
-control the PATH for every Codex launch.
+Keep this shell open for the remaining commands. `PYBIN` and
+`HEARTWOOD_DB_PATH` are absolute paths, so Codex can start Heartwood regardless
+of the directory from which you launch it. The `mkdir` is required before
+SQLite opens the database on its first run.
 
 ## Register The Local MCP Server
 
@@ -28,10 +42,8 @@ Safe default: read-only recall plus health. Add `remember` or `forget` only when
 the tenant has explicitly approved write or erasure access for Codex.
 
 ```bash
-PYBIN="/absolute/path/to/.venv/bin/python"
-
 codex mcp add heartwood \
-  --env HEARTWOOD_DB_PATH=.heartwood/heartwood.db \
+  --env HEARTWOOD_DB_PATH="$HEARTWOOD_DB_PATH" \
   --env HEARTWOOD_TENANT=tenant:ops \
   --env HEARTWOOD_MCP_ALLOWED_TOOLS=recall,explain_recall,health \
   -- "$PYBIN" -m heartwood.adapters.mcp_server
@@ -49,9 +61,9 @@ that the CLI command does not expose directly.
 
 ```toml
 [mcp_servers.heartwood]
-command = "/absolute/path/to/.venv/bin/python"
+command = "/absolute/path/to/heartwood-memory/.venv/bin/python"
 args = ["-m", "heartwood.adapters.mcp_server"]
-env = { HEARTWOOD_DB_PATH = ".heartwood/heartwood.db", HEARTWOOD_TENANT = "tenant:ops", HEARTWOOD_MCP_ALLOWED_TOOLS = "recall,explain_recall,health" }
+env = { HEARTWOOD_DB_PATH = "/absolute/path/to/heartwood-data/heartwood.db", HEARTWOOD_TENANT = "tenant:ops", HEARTWOOD_MCP_ALLOWED_TOOLS = "recall,explain_recall,health" }
 startup_timeout_sec = 45
 tool_timeout_sec = 120
 enabled = true
@@ -102,14 +114,20 @@ and `forget`.
 
 ```bash
 codex --version
-codex mcp list --json
+codex mcp get heartwood --json
 ```
 
-Then run the Heartwood-side smoke checks:
+Then run the Heartwood-side smoke checks. The recipe test starts the configured
+server over stdio, completes an MCP handshake, lists the read-only tools, calls
+`health`, and confirms that the database was created at the absolute path:
 
 ```bash
-/absolute/path/to/.venv/bin/python tests/test_codex_recipe.py
-/absolute/path/to/.venv/bin/python tests/test_mcp_hardening.py
+HEARTWOOD_DB_PATH="$HEARTWOOD_DB_PATH" \
+HEARTWOOD_TENANT=tenant:ops \
+HEARTWOOD_MCP_ALLOWED_TOOLS=recall,explain_recall,health \
+"$PYBIN" tests/test_codex_recipe.py
+
+"$PYBIN" tests/test_mcp_hardening.py
 ```
 
 If the Codex CLI is unavailable in your environment, the Heartwood tests still
