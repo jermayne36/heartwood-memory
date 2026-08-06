@@ -22,10 +22,11 @@ Set the new, unpublished version:
 export RELEASE_VERSION="X.Y.Z"
 ```
 
-Update all four release surfaces:
+Update all five release surfaces:
 
 - `pyproject.toml`: `[project].version`
 - `heartwood/__init__.py`: `__version__`
+- `server.json`: top-level `version` and the PyPI package `version`
 - `tests/test_version_consistency.py`: expected version
 - `CHANGELOG.md`: move `[Unreleased]` entries into a dated release section
 
@@ -33,8 +34,8 @@ Verify the version is internally consistent and absent from PyPI:
 
 ```bash
 python3.11 scripts/check_version.py
-rg -n '^(version =|__version__ =)|== "[0-9]+\.[0-9]+\.[0-9]+"' \
-  pyproject.toml heartwood/__init__.py tests/test_version_consistency.py
+rg -n '^(version =|__version__ =)|"version":|== "[0-9]+\.[0-9]+\.[0-9]+"' \
+  pyproject.toml heartwood/__init__.py server.json tests/test_version_consistency.py
 PYPI_STATUS="$(
   curl -sS -o /dev/null -w '%{http_code}' \
     "https://pypi.org/pypi/heartwood-memory/${RELEASE_VERSION}/json"

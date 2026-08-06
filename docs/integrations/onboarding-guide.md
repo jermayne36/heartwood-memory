@@ -64,7 +64,9 @@ heartwood recall `
 
 ## 4. Enable MCP
 
-Copy `.mcp.json.example` to `.mcp.json` and set its interpreter path, or run:
+Copy `.mcp.json.example` to `.mcp.json`; it uses `uvx heartwood-memory`, so no
+machine-specific interpreter path is required. To run the installed package
+directly instead, use:
 
 ```powershell
 $env:HEARTWOOD_DB_PATH = ".\.heartwood\heartwood.db"
