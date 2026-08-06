@@ -69,7 +69,7 @@ machine-specific interpreter path is required. To run the installed package
 directly instead, use:
 
 ```powershell
-$env:HEARTWOOD_DB_PATH = ".\heartwood.db"
+$env:HEARTWOOD_DB_PATH = ".\.heartwood\heartwood.db"
 $env:HEARTWOOD_TENANT = "tenant:ops"
 python -m heartwood.adapters.mcp_server
 ```
