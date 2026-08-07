@@ -313,6 +313,66 @@ class Store:
         self.conn.commit()
         return cur.rowcount == 1
 
+    def update_substrate_metadata_audited(
+        self,
+        mem_id: str,
+        *,
+        valid_from: str | None,
+        valid_until: str | None,
+        entities: tuple[str, ...],
+        truth_status: str,
+        expected_from: dict,
+        expected_content_hash: str,
+        tenant: str,
+        principal: str,
+        action: str,
+        audit_body: str,
+    ) -> dict | None:
+        """CAS-update typed metadata and append its audit event atomically."""
+        expected_entities = json.dumps(list(expected_from["entities"]))
+        target_entities = json.dumps(list(entities))
+        try:
+            self.conn.execute("BEGIN IMMEDIATE")
+            cur = self.conn.execute(
+                "UPDATE memories SET valid_from=?, valid_until=?, entities_json=?, "
+                "truth_status=? WHERE id=? AND tenant=? "
+                "AND (valid_from IS ? OR valid_from=?) "
+                "AND (valid_until IS ? OR valid_until=?) "
+                "AND COALESCE(entities_json, '[]')=? "
+                "AND (truth_status IS NULL OR truth_status=?) "
+                "AND content_hash=?",
+                (
+                    valid_from,
+                    valid_until,
+                    target_entities,
+                    truth_status,
+                    mem_id,
+                    tenant,
+                    expected_from["valid_from"],
+                    expected_from["valid_from"],
+                    expected_from["valid_until"],
+                    expected_from["valid_until"],
+                    expected_entities,
+                    expected_from["truth_status"],
+                    expected_content_hash,
+                ),
+            )
+            if cur.rowcount != 1:
+                self.conn.rollback()
+                return None
+            transition = self.append_audit_in_transaction(
+                tenant,
+                principal,
+                action,
+                mem_id,
+                audit_body,
+            )
+            self.conn.commit()
+            return transition
+        except Exception:
+            self.conn.rollback()
+            raise
+
     def review_queue(self, tenant: str, state: str | None) -> list[dict]:
         state = getattr(state, "value", state)
         rows = self.conn.execute(

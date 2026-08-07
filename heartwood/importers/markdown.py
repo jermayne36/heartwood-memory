@@ -22,7 +22,8 @@ from ..contextual_ingest import (
     default_egress_request_builder,
     ingest_contextual,
 )
-from ..envelope import Epistemic, Kind, Policy, hash_content
+from ..envelope import Epistemic, Kind, Policy, TruthStatus, default_truth_status, hash_content
+from ..metadata import normalize_substrate_metadata
 from ..policy import Principal
 from ..retrieval import get_embedder, get_reranker, tokenize
 from ..store import Store
@@ -101,6 +102,9 @@ class MarkdownMemorySpec:
     entities: tuple[str, ...]
     valid_from: str | None
     valid_until: str | None
+    truth_status: str | None
+    explicit_metadata: frozenset[str]
+    memory_id_pinned: bool
 
 
 def import_markdown_corpus(
@@ -135,6 +139,7 @@ def import_markdown_corpus(
     embedder, reranker = _resolve_models(embedder, reranker)
     producer = created_by or default_principal
     imported: list[dict[str, str]] = []
+    updated: list[dict[str, str]] = []
     skipped: list[dict[str, str]] = []
     warnings: list[dict[str, str]] = []
     errors: list[dict[str, str]] = []
@@ -206,16 +211,36 @@ def import_markdown_corpus(
                             spec.relative_path,
                             source_uri=spec.source_uri,
                         )
-                        stale_prior_rows = [
+                        current_prior_rows = [
                             row for row in prior_rows
-                            if row.get("content_hash") != spec.content_hash
+                            if _is_current_source_row(row["id"], spec, use_contextual)
                         ]
-                        if existing and existing.get("content_hash") == spec.content_hash:
+                        stale_prior_rows = [
+                            row for row in prior_rows if row not in current_prior_rows
+                        ]
+                        body_unchanged = bool(
+                            existing
+                            and (
+                                existing.get("content_hash") == spec.content_hash
+                                or (use_contextual and not spec.memory_id_pinned)
+                            )
+                        )
+                        if body_unchanged:
+                            for row in current_prior_rows:
+                                if _refresh_metadata(db, spec, row):
+                                    updated.append(
+                                        {
+                                            "path": spec.relative_path,
+                                            "tenant": spec.tenant,
+                                            "id": row["id"],
+                                            "reason": "frontmatter_metadata_changed",
+                                        }
+                                    )
                             _purge_prior_rows(db, spec, stale_prior_rows, purged)
                             existing = db.store.get_meta(existing_id)
-                        elif existing and stale_prior_rows:
+                        elif existing:
                             _ensure_signing_available(db, spec.created_by)
-                            _purge_prior_rows(db, spec, stale_prior_rows, purged)
+                            _purge_prior_rows(db, spec, prior_rows, purged)
                             existing = db.store.get_meta(existing_id)
                         else:
                             post_import_purge_rows = stale_prior_rows
@@ -253,6 +278,7 @@ def import_markdown_corpus(
                                 created_by=spec.created_by,
                                 kind=spec.kind,
                                 epistemic=spec.epistemic,
+                                truth_status=spec.truth_status,
                                 confidence=spec.confidence,
                                 salience=spec.salience,
                                 source={
@@ -326,6 +352,7 @@ def import_markdown_corpus(
                         created_by=spec.created_by,
                         kind=spec.kind,
                         epistemic=spec.epistemic,
+                        truth_status=spec.truth_status,
                         confidence=spec.confidence,
                         salience=spec.salience,
                         source={
@@ -374,6 +401,7 @@ def import_markdown_corpus(
         documents=documents,
         source_document_counts=source_document_counts,
         imported=imported,
+        updated=updated,
         skipped=skipped,
         errors=errors,
         warnings=warnings,
@@ -444,6 +472,7 @@ def _import_report(
     documents: list[MarkdownDocument],
     source_document_counts: dict[Path, int],
     imported: list[dict[str, str]],
+    updated: list[dict[str, str]],
     skipped: list[dict[str, str]],
     errors: list[dict[str, str]],
     warnings: list[dict[str, str]],
@@ -452,7 +481,11 @@ def _import_report(
     row_counts_before: dict[str, int],
     row_counts_after: dict[str, int],
 ) -> dict[str, Any]:
-    processed_paths = {row["path"] for row in imported} | {row["path"] for row in skipped}
+    processed_paths = (
+        {row["path"] for row in imported}
+        | {row["path"] for row in updated}
+        | {row["path"] for row in skipped}
+    )
     source_coverage_count = len(processed_paths)
     source_lag_count = max(0, len(documents) - source_coverage_count)
     row_count_before = sum(row_counts_before.values())
@@ -463,6 +496,7 @@ def _import_report(
         "source_count": len(documents),
         "source_counts": {str(source): count for source, count in source_document_counts.items()},
         "imported_count": len(imported),
+        "updated_count": len(updated),
         "skipped_count": len(skipped),
         "failed_count": len(errors),
         "purged_count": len(purged),
@@ -480,6 +514,7 @@ def _import_report(
         "memory_row_counts_after": row_counts_after,
         "tenant_counts": dict(sorted(tenants.items())),
         "imported": imported,
+        "updated": updated,
         "skipped": skipped,
         "purged": purged,
         "superseded": purged,  # Deprecated alias for `purged`. Removal target: 0.3.0.
@@ -528,6 +563,51 @@ def _purge_prior_rows(
 
 def _ensure_signing_available(db: Heartwood, principal_id: str) -> None:
     db.signer.register(principal_id)
+
+
+def _is_current_source_row(mem_id: str, spec: MarkdownMemorySpec, contextual: bool) -> bool:
+    if not contextual:
+        return mem_id == spec.memory_id
+    return mem_id.startswith(f"{spec.memory_id}:chunk:")
+
+
+def _refresh_metadata(db: Heartwood, spec: MarkdownMemorySpec, row: dict[str, Any]) -> bool:
+    if not spec.explicit_metadata:
+        return False
+    target_valid_from = (
+        spec.valid_from if "valid_from" in spec.explicit_metadata else row["valid_from"]
+    )
+    target_valid_until = (
+        spec.valid_until if "valid_until" in spec.explicit_metadata else row["valid_until"]
+    )
+    target_entities = spec.entities if "entities" in spec.explicit_metadata else row["entities"]
+    target_truth_status = row["truth_status"]
+    if "truth_status" in spec.explicit_metadata and row.get("policy_scope") != "contextual-aux":
+        target_truth_status = spec.truth_status or default_truth_status(row["epistemic"])
+    normalized = normalize_substrate_metadata(
+        valid_from=target_valid_from,
+        valid_until=target_valid_until,
+        entities=target_entities,
+        truth_status=target_truth_status,
+    )
+    current = {
+        "valid_from": row["valid_from"],
+        "valid_until": row["valid_until"],
+        "entities": tuple(row["entities"]),
+        "truth_status": row["truth_status"],
+    }
+    if normalized == current:
+        return False
+    db.update_substrate_metadata(
+        row["id"],
+        valid_from=normalized["valid_from"],
+        valid_until=normalized["valid_until"],
+        entities=normalized["entities"],
+        truth_status=normalized["truth_status"],
+        actor=spec.created_by,
+        reason=f"markdown metadata refresh: {spec.relative_path}",
+    )
+    return True
 
 
 def load_markdown_documents(sources: Iterable[str | Path]) -> list[MarkdownDocument]:
@@ -594,7 +674,32 @@ def build_memory_spec(
     policy_scope = str(_first(meta, "policy_scope") or tenant_slug)
     source_uri = str(_first(meta, "source_uri", "source_id") or f"markdown://{document.relative_path}")
     content_hash = hash_content(document.content)
-    memory_id = str(_first(meta, "memory_id", "id") or stable_memory_id(tenant, document.relative_path, content_hash))
+    explicit_memory_id = _first(meta, "memory_id", "id")
+    memory_id = str(
+        explicit_memory_id or stable_memory_id(tenant, document.relative_path, content_hash)
+    )
+    explicit_metadata = frozenset(
+        key for key in ("entities", "valid_from", "valid_until", "truth_status") if key in meta
+    )
+    raw_truth_status = _first(meta, "truth_status")
+    truth_status = None
+    if "truth_status" in explicit_metadata and raw_truth_status is not None:
+        try:
+            truth_status = TruthStatus(str(raw_truth_status)).value
+        except ValueError as exc:
+            allowed = ", ".join(status.value for status in TruthStatus)
+            raise ValueError(f"truth_status must be one of: {allowed}") from exc
+        if truth_status == TruthStatus.HUMAN_APPROVED.value:
+            raise PermissionError("human_approved requires approve(), not markdown import")
+    raw_entities = list_value(_first(meta, "entities"), default=[])
+    raw_valid_from = _none_or_str(_first(meta, "valid_from"))
+    raw_valid_until = _none_or_str(_first(meta, "valid_until"))
+    normalized = normalize_substrate_metadata(
+        valid_from=raw_valid_from,
+        valid_until=raw_valid_until,
+        entities=tuple(str(item) for item in raw_entities),
+        truth_status=truth_status or default_truth_status(epistemic),
+    )
     return MarkdownMemorySpec(
         path=document.path,
         relative_path=document.relative_path,
@@ -615,9 +720,12 @@ def build_memory_spec(
         source_uri=source_uri,
         content_hash=content_hash,
         content=document.content,
-        entities=tuple(str(item) for item in list_value(_first(meta, "entities"), default=[])),
-        valid_from=_none_or_str(_first(meta, "valid_from")),
-        valid_until=_none_or_str(_first(meta, "valid_until")),
+        entities=normalized["entities"],
+        valid_from=normalized["valid_from"],
+        valid_until=normalized["valid_until"],
+        truth_status=truth_status,
+        explicit_metadata=explicit_metadata,
+        memory_id_pinned=explicit_memory_id is not None,
     )
 
 
@@ -669,6 +777,8 @@ def parse_scalar(value: str) -> Any:
     if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
         return value[1:-1]
     lowered = value.lower()
+    if lowered in {"null", "none", "~"}:
+        return None
     if lowered in {"true", "yes", "on"}:
         return True
     if lowered in {"false", "no", "off"}:
