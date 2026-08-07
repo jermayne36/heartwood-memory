@@ -23,12 +23,9 @@
       },
       "name": "mem0",
       "requirements": {
-        "api_surface": "mem0 client add()/search()/get_all()/delete()",
-        "free_tier": "hosted free tier exists; self-host OSS avoids signup",
-        "needs": "mem0 account + OpenAI (or configured LLM) API key",
-        "network": "third-party calls to mem0 + an embedding/LLM provider",
-        "probe_applicability": "Forgery/tamper/erasure probes measure whether a signed-provenance / hash-chained-audit / key-destruction primitive EXISTS to test; a real run reports primitive-absent where mem0 offers no equivalent receipt.",
-        "signup": "yes (hosted) \u2014 OUT of scope for a $0 no-signup run"
+        "adapter": "not implemented in benchmark v1",
+        "measured_in_this_run": "nothing",
+        "needs": "a live adapter and an owner-approved, funded run before any capability, requirement, or comparison for this substrate is published"
       },
       "status": "stub"
     },
@@ -45,12 +42,9 @@
       },
       "name": "zep",
       "requirements": {
-        "api_surface": "Zep memory add/search/delete; graph episodes",
-        "free_tier": "cloud free tier exists; self-host avoids signup",
-        "needs": "Zep Cloud API key or self-hosted Zep + Graphiti stack",
-        "network": "third-party calls to Zep + an embedding/LLM provider",
-        "probe_applicability": "Policy-leak and retirement probes map to Zep's access model and episode invalidation; a real run measures whether recall exclusion and audited retirement are enforced, not merely available.",
-        "signup": "yes (cloud) \u2014 OUT of scope for a $0 no-signup run"
+        "adapter": "not implemented in benchmark v1",
+        "measured_in_this_run": "nothing",
+        "needs": "a live adapter and an owner-approved, funded run before any capability, requirement, or comparison for this substrate is published"
       },
       "status": "stub"
     },
@@ -67,12 +61,9 @@
       },
       "name": "supermemory",
       "requirements": {
-        "api_surface": "Supermemory add/search/delete endpoints",
-        "free_tier": "free tier exists; requires account + API key",
-        "needs": "Supermemory API key",
-        "network": "third-party calls to the Supermemory API",
-        "probe_applicability": "All five probe classes require the corresponding governance receipt to exist; a real run reports primitive-absent for any receipt Supermemory does not provide, rather than a pass/fail comparison.",
-        "signup": "yes \u2014 OUT of scope for a $0 no-signup run"
+        "adapter": "not implemented in benchmark v1",
+        "measured_in_this_run": "nothing",
+        "needs": "a live adapter and an owner-approved, funded run before any capability, requirement, or comparison for this substrate is published"
       },
       "status": "stub"
     }
@@ -375,32 +366,6 @@
           }
         },
         {
-          "case_id": "erasure_content_unreachable_after_forget",
-          "case_type": "contract",
-          "claim_anchor": "content_provenance_authenticity",
-          "description": "After a hard forget the subject's content is no longer returned by recall.",
-          "expectation": "record absent from recall after forget",
-          "matches_contract": true,
-          "measured": {
-            "in_recall": false,
-            "raw_active_keys_before": 1
-          }
-        },
-        {
-          "case_id": "erasure_crypto_erase_proof",
-          "case_type": "contract",
-          "claim_anchor": "content_provenance_authenticity",
-          "description": "prove_crypto_erase_path reports the subject key shredded and, with the root absent, content unrecoverable.",
-          "expectation": "content_unrecoverable=True, proved=True, raw_active_key_count=0, shredded_key_count>=1",
-          "matches_contract": true,
-          "measured": {
-            "content_unrecoverable": true,
-            "proved": true,
-            "raw_active_key_count": 0,
-            "shredded_key_count": 1
-          }
-        },
-        {
           "case_id": "erasure_event_retained_and_chain_valid",
           "case_type": "contract",
           "claim_anchor": "content_provenance_authenticity",
@@ -434,12 +399,12 @@
   "reproducibility": {
     "deterministic_models": "heartwood dev hashing embedder + lexical reranker",
     "fixed_fixtures": true,
-    "note": "governance behavior is embedder-independent; retrieval quality is not measured",
+    "note": "this run fixes the model pair above and does not measure retrieval quality; no cross-embedder comparison was run",
     "offline": true
   },
   "run_metadata": {
-    "generated_at_pacific": "2026-07-23 15:29:55 PDT",
-    "generated_at_utc": "2026-07-23T22:29:55.928643+00:00",
+    "generated_at_pacific": "2026-08-07 10:59:57 PDT",
+    "generated_at_utc": "2026-08-07T17:59:57.977223+00:00",
     "platform": "macOS-26.5.2-arm64-arm-64bit",
     "python": "3.11.15"
   },
@@ -453,7 +418,7 @@
   "summary": {
     "boundaries_published": 5,
     "contract_cases_failed": 0,
-    "contract_cases_upheld": 20,
+    "contract_cases_upheld": 18,
     "overall": "PASS",
     "probe_status_counts": {
       "PASS": 5

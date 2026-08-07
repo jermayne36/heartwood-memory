@@ -87,25 +87,46 @@ def _now() -> dict:
     }
 
 
-def _probe_prose(probes: list[dict]) -> str:
-    """Human-facing prose from the probe results (descriptions, expectations,
-    notes) — the text that could overclaim. Structural enum labels such as the
-    ``case_type`` value 'guarantee' are deliberately excluded."""
-    lines: list[str] = []
-    for probe in probes:
-        lines.extend(probe.get("notes", []))
-        for case in probe["cases"]:
-            lines.append(case.get("description", ""))
-            lines.append(case.get("expectation", ""))
-    return "\n".join(lines)
+# Structural enum vocabulary, not published prose: the ``case_type`` values
+# ('contract', 'positive_control', 'boundary') and the ``status`` values
+# ('PASS', 'SKIPPED', ...) are machine labels the scanner would only ever
+# misread. Every OTHER string in the receipt is text a human can read and is
+# therefore scanned.
+_STRUCTURAL_KEYS = frozenset({"case_type", "status"})
+
+
+def _receipt_strings(node, path: str = "receipt"):
+    """Yield ``(json_path, text)`` for every human-readable string in a receipt.
+
+    Walks the whole receipt — case ids, descriptions, expectations, claim
+    anchors, probe notes, measured string values, competitor requirements, and
+    the reproducibility / spend / metadata prose — so the claim scan covers what
+    is actually published rather than a subset of it.
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in _STRUCTURAL_KEYS:
+                continue
+            yield from _receipt_strings(value, f"{path}.{key}")
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            yield from _receipt_strings(value, f"{path}[{index}]")
+    elif isinstance(node, str):
+        yield path, node
+
+
+def scan_receipt(receipt: dict) -> list[claim_scan.Violation]:
+    """Claim-scan every published field of a receipt, each under its own JSON
+    path so a violation names the exact field it came from."""
+    violations: list[claim_scan.Violation] = []
+    for label, text in _receipt_strings(receipt):
+        violations.extend(claim_scan.scan_text(text, label=label))
+    return violations
 
 
 def build_receipt(probes: list[dict]) -> dict:
     measured_version = heartwood.__version__
     competitors = _competitors()
-    scan_targets = [_BENCH_DIR / "DESIGN.md", _BENCH_DIR / "README.md"]
-    violations = claim_scan.scan_files(scan_targets)
-    violations += claim_scan.scan_text(_probe_prose(probes), label="<probe-prose>")
     receipt = {
         "benchmark": {
             "name": "heartwood-trust-receipts-benchmark",
@@ -121,8 +142,8 @@ def build_receipt(probes: list[dict]) -> dict:
             "deterministic_models": "heartwood dev hashing embedder + lexical reranker",
             "fixed_fixtures": True,
             "offline": True,
-            "note": "governance behavior is embedder-independent; retrieval "
-                    "quality is not measured",
+            "note": "this run fixes the model pair above and does not measure "
+                    "retrieval quality; no cross-embedder comparison was run",
         },
         "spend_receipt": {
             "usd_spent": 0,
@@ -142,6 +163,12 @@ def build_receipt(probes: list[dict]) -> dict:
         "summary": _summarize(probes),
         "competitors": competitors,
     }
+    # Scan the docs AND the fully-built receipt. The scan runs last so it covers
+    # every published field; `claim_scan` itself is attached afterwards and is
+    # therefore never scanned into its own result.
+    violations = claim_scan.scan_files([_BENCH_DIR / "DESIGN.md",
+                                        _BENCH_DIR / "README.md"])
+    violations += scan_receipt(receipt)
     receipt["claim_scan"] = {
         "clean": not violations,
         "violation_count": len(violations),

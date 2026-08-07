@@ -23,8 +23,10 @@ Five probe classes, each pairing a receipt with a concrete adversary:
    drop, and tail-truncation with external anchoring).
 4. **Record retirement** → recall visibility & retirement (unindex, expire,
    supersede, audit coverage, and a raw-write boundary).
-5. **Erasure receipts** → key-destruction receipt (hard forget, recall
-   unreachability, crypto-erase-path proof, and a root-present boundary).
+5. **Erasure receipts** → key-destruction receipt (hard forget shreds the
+   per-subject key and purges derived artifacts, the erasure event stays on a
+   chain that still verifies, and a root-present boundary where the proof does
+   not assert unrecoverability).
 
 Contract cases must uphold their documented behavior or the probe fails.
 Boundary cases publish documented limits and never fail the run — that is the
@@ -69,12 +71,14 @@ finding, reported honestly, not hidden.
 
 ## Competitors
 
-Mem0, Zep, and Supermemory are present as **honest stubs** (`adapters/stubs.py`).
-This v1 run makes zero third-party calls and requires zero signups, so **no
-comparative claim about a competitor exists yet**. Each stub declares what a
-real run would require (API surface, free-tier status, credential/signup needs)
-and which probe classes even apply. Running any probe against a stub is
-`SKIPPED`, never a fabricated comparison.
+Mem0, Zep, and Supermemory are present as **honest stubs** (`adapters/stubs.py`)
+— a name, and nothing measured. This v1 run makes zero third-party calls and
+requires zero signups, so **no comparative claim about a competitor exists
+yet**. Each stub reports its capabilities as `null` ("not measured in this run")
+and states only that a live adapter and an owner-approved, funded run are needed
+before anything about that substrate is published. No API surface, free-tier
+posture, or signup requirement is asserted here. Running any probe against a
+stub is `SKIPPED`, never a fabricated comparison.
 
 ## Spend
 

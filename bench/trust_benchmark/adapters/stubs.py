@@ -2,29 +2,52 @@
 
 These are intentionally non-live. This benchmark run makes ZERO third-party
 network calls and requires ZERO new competitor signups or credentials, so no
-comparative claim about a competitor is produced. Each stub declares (a) which
-governance primitives the product is understood to offer vs not, and (b)
-exactly what a real, funded run would require. The stubs make it structurally
-impossible to publish a competitor comparison until a real run replaces them.
+comparative claim about a competitor is produced.
 
-Capability rows below are declared as ``None`` = "not independently verified in
-this run". They are hypotheses to be confirmed by a real adapter, never claims.
+A stub publishes only two things: the *name* of a substrate no adapter has been
+written for, and the fact that nothing about it was measured here. It
+deliberately does NOT publish that product's API surface, pricing/free-tier
+posture, signup or credential requirements, or which governance primitives it
+does or does not offer. Those are competitor-specific assertions, and this run
+has no evidence for any of them — a reader would reasonably take them as a
+comparison. They may be published only after a real, owner-approved run against
+a live adapter, with a cited source per statement and legal review.
+
+Capability rows below are uniformly ``None`` = "not measured in this run".
 """
 from __future__ import annotations
 
 from .base import AdapterNotAvailable, MemoryAdapter, Session
 
+# Every governance primitive the benchmark can probe, declared unmeasured for
+# every stub. Uniformly None: this run distinguishes no competitor from another.
+_UNMEASURED_CAPABILITIES: dict = {
+    "signed_provenance": None,
+    "strict_enforcement": None,
+    "hash_chained_audit": None,
+    "external_anchor": None,
+    "policy_before_ranking": None,
+    "auditable_retirement": None,
+    "key_destruction_receipt": None,
+    "crypto_erase_proof": None,
+}
+
 
 class _CompetitorStub(MemoryAdapter):
-    _requirements: dict = {}
-    _capabilities: dict = {}
-    _applicability: str = ""
+    _capabilities: dict = _UNMEASURED_CAPABILITIES
+    _requirements: dict = {
+        "adapter": "not implemented in benchmark v1",
+        "measured_in_this_run": "nothing",
+        "needs": "a live adapter and an owner-approved, funded run before any "
+                 "capability, requirement, or comparison for this substrate is "
+                 "published",
+    }
 
     def capabilities(self) -> dict:
         return dict(self._capabilities)
 
     def requirements(self) -> dict:
-        return {**self._requirements, "probe_applicability": self._applicability}
+        return dict(self._requirements)
 
     def session(self, **config) -> Session:
         raise AdapterNotAvailable(
@@ -35,81 +58,14 @@ class _CompetitorStub(MemoryAdapter):
 
 class Mem0Stub(_CompetitorStub):
     name = "mem0"
-    _capabilities = {
-        # None = not independently verified in this run (hypothesis, not a claim).
-        "signed_provenance": None,
-        "strict_enforcement": None,
-        "hash_chained_audit": None,
-        "external_anchor": None,
-        "policy_before_ranking": None,
-        "auditable_retirement": None,
-        "key_destruction_receipt": None,
-        "crypto_erase_proof": None,
-    }
-    _requirements = {
-        "needs": "mem0 account + OpenAI (or configured LLM) API key",
-        "api_surface": "mem0 client add()/search()/get_all()/delete()",
-        "free_tier": "hosted free tier exists; self-host OSS avoids signup",
-        "signup": "yes (hosted) — OUT of scope for a $0 no-signup run",
-        "network": "third-party calls to mem0 + an embedding/LLM provider",
-    }
-    _applicability = (
-        "Forgery/tamper/erasure probes measure whether a signed-provenance / "
-        "hash-chained-audit / key-destruction primitive EXISTS to test; a real "
-        "run reports primitive-absent where mem0 offers no equivalent receipt."
-    )
 
 
 class ZepStub(_CompetitorStub):
     name = "zep"
-    _capabilities = {
-        "signed_provenance": None,
-        "strict_enforcement": None,
-        "hash_chained_audit": None,
-        "external_anchor": None,
-        "policy_before_ranking": None,
-        "auditable_retirement": None,
-        "key_destruction_receipt": None,
-        "crypto_erase_proof": None,
-    }
-    _requirements = {
-        "needs": "Zep Cloud API key or self-hosted Zep + Graphiti stack",
-        "api_surface": "Zep memory add/search/delete; graph episodes",
-        "free_tier": "cloud free tier exists; self-host avoids signup",
-        "signup": "yes (cloud) — OUT of scope for a $0 no-signup run",
-        "network": "third-party calls to Zep + an embedding/LLM provider",
-    }
-    _applicability = (
-        "Policy-leak and retirement probes map to Zep's access model and "
-        "episode invalidation; a real run measures whether recall exclusion and "
-        "audited retirement are enforced, not merely available."
-    )
 
 
 class SupermemoryStub(_CompetitorStub):
     name = "supermemory"
-    _capabilities = {
-        "signed_provenance": None,
-        "strict_enforcement": None,
-        "hash_chained_audit": None,
-        "external_anchor": None,
-        "policy_before_ranking": None,
-        "auditable_retirement": None,
-        "key_destruction_receipt": None,
-        "crypto_erase_proof": None,
-    }
-    _requirements = {
-        "needs": "Supermemory API key",
-        "api_surface": "Supermemory add/search/delete endpoints",
-        "free_tier": "free tier exists; requires account + API key",
-        "signup": "yes — OUT of scope for a $0 no-signup run",
-        "network": "third-party calls to the Supermemory API",
-    }
-    _applicability = (
-        "All five probe classes require the corresponding governance receipt to "
-        "exist; a real run reports primitive-absent for any receipt Supermemory "
-        "does not provide, rather than a pass/fail comparison."
-    )
 
 
 def competitor_stub_adapters() -> list[MemoryAdapter]:

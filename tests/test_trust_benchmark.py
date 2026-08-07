@@ -4,6 +4,7 @@ These run under scripts/check.sh so the benchmark stays correct and offline as
 Heartwood evolves. They import the harness from ``bench/`` (which is not part of
 the shipped wheel) and exercise every probe against the live adapter.
 """
+import copy
 import os
 import sys
 from pathlib import Path
@@ -108,11 +109,79 @@ def test_competitor_adapters_are_honest_stubs():
 
 def test_claim_anchor_scan_is_clean_on_benchmark_text():
     violations = claim_scan.scan_files([_BENCH / "DESIGN.md", _BENCH / "README.md"])
-    probes = run_benchmark.run_suite()
-    violations += claim_scan.scan_text(
-        run_benchmark._probe_prose(probes), label="<probe-prose>"
-    )
+    receipt = run_benchmark.build_receipt(run_benchmark.run_suite())
+    receipt.pop("claim_scan", None)
+    violations += run_benchmark.scan_receipt(receipt)
     assert not violations, [v.to_dict() for v in violations]
+
+
+@pytest.fixture(scope="module")
+def receipt_body():
+    """A fully-built receipt with its own scan result removed, so it can be
+    re-scanned after a deliberate injection."""
+    receipt = run_benchmark.build_receipt(run_benchmark.run_suite())
+    receipt.pop("claim_scan", None)
+    return receipt
+
+
+# @positive-control(claim-scan-covers-full-receipt)
+@pytest.mark.parametrize(
+    "path",
+    [
+        ("competitors", 0, "requirements", "needs"),
+        ("reproducibility", "note"),
+        ("spend_receipt", "notes"),
+    ],
+    ids=["competitor-requirements", "reproducibility-prose", "spend-prose"],
+)
+def test_claim_scan_positive_control_reaches_every_published_field(receipt_body, path):
+    """POSITIVE control: the scan must FIRE on a bad value in each published field.
+
+    The v1 scanner read only probe descriptions/expectations/notes, so a receipt
+    could report ``claim_scan.clean = true`` while competitor requirement prose
+    went unread — which is exactly where the 2026-08-07 human claim gate found
+    its failure (KAI-CLM-03). Asserting that clean text stays clean would not
+    have caught that; only proving the guard fires on bad input does.
+    """
+    receipt = copy.deepcopy(receipt_body)
+    assert not run_benchmark.scan_receipt(receipt), "receipt is not clean pre-injection"
+
+    node = receipt
+    for key in path[:-1]:
+        node = node[key]
+    node[path[-1]] = "we guarantee this and it is unbreakable"
+
+    violations = run_benchmark.scan_receipt(receipt)
+    assert violations, f"{'.'.join(map(str, path))} is NOT reached by the claim scan"
+    assert any(str(path[-1]) in v.file for v in violations), [
+        v.to_dict() for v in violations
+    ]
+
+
+def test_published_receipt_makes_no_recall_exclusion_claim(receipt_body):
+    """KAI-CLM-01: the erasure probe publishes no positive recall-exclusion or
+    content-unrecoverability claim while finding F4 is open."""
+    erasure = next(p for p in receipt_body["probes"]
+                   if p["probe_class"] == "erasure_receipts")
+    published_ids = {c["case_id"] for c in erasure["cases"]}
+    assert "erasure_content_unreachable_after_forget" not in published_ids
+    assert "erasure_crypto_erase_proof" not in published_ids
+    # The root-present boundary is explicitly preserved (Kai's remediation).
+    boundary = next(c for c in erasure["cases"] if c["case_type"] == BOUNDARY)
+    assert boundary["measured"]["content_unrecoverable"] is False
+    assert boundary["claim_anchor"] == "NOT_CLAIMED:db_compromise_resistance"
+
+
+def test_competitor_stubs_publish_no_competitor_specific_prose(receipt_body):
+    """KAI-CLM-02: stubs may publish a name and null capabilities, never a
+    competitor's API surface, free-tier posture, or signup/credential needs."""
+    banned = ("api_surface", "free_tier", "signup", "network", "probe_applicability")
+    for competitor in receipt_body["competitors"]:
+        assert set(competitor["capabilities"].values()) == {None}
+        assert not set(competitor["requirements"]) & set(banned), competitor
+        blob = " ".join(competitor["requirements"].values()).lower()
+        for token in ("api key", "free tier", "openai", "graphiti", "no equivalent"):
+            assert token not in blob, f"{competitor['name']}: {token!r} in {blob!r}"
 
 
 def test_claim_scan_catches_overclaims():

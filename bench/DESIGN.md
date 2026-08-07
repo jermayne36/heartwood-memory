@@ -34,7 +34,7 @@ substrate; they are attack simulation for measurement, never a product API.
 | 2 | **Policy-leak probes** | Policy before ranking | Adversarial recall cue for confidential content; caller filter-widening; database-write metadata downgrade | Under-cleared readers do not receive restricted content; caller filters cannot escalate clearance |
 | 3 | **Audit tamper detection** | Tamper-evident audit | In-place edit of an audit row; interior-row drop; tail truncation | `verify_audit()` detects in-place edits and interior drops; external anchoring detects tail truncation |
 | 4 | **Record retirement** | Recall visibility & retirement | Retire via `set_indexed` / `expire` / supersede, then adversarial opt-in recall; raw column write | Each mechanism removes a record from the answerable corpus exactly as documented, and each is audited |
-| 5 | **Erasure receipts** | Key-destruction receipt | Hard `forget`, then recall and crypto-erase-path proof | `forget(hard)` shreds the per-subject key, content becomes unreachable via recall, and the proof reports unrecoverability under the stated root-absence condition |
+| 5 | **Erasure receipts** | Key-destruction receipt | Hard `forget`, then the crypto-erase-path proof with the wrapping root present | `forget(hard)` shreds the per-subject key and purges derived artifacts, the erasure event stays on a chain that still verifies, and the proof does **not** assert unrecoverability while the root is present |
 
 The five ratified probe classes map to Heartwood's public receipt table
 (`README.md` "What you get — five receipts"). Probe 4 (retirement) targets the
@@ -75,11 +75,24 @@ Suite verdict: `overall = FAIL` if any contract case failed, else `PASS`.
 Boundaries are counted and published separately (`boundaries_published`) so a
 reader can see how many documented limits were exercised.
 
-The benchmark also runs a **claim-anchor scan** (`claim_scan.py`) over its own
-docs and result prose. Absolute-promise vocabulary and whole-store secrecy
-phrasing must never appear; the NOT-claimed capability phrases may appear only
-in a disclaimer context or attached to the `NOT_CLAIMED` anchor. The scan is
-part of the receipt and part of the test gate.
+The benchmark also runs a **claim-anchor scan** (`claim_scan.py`) over
+`DESIGN.md`, `README.md`, and **every human-readable string in the emitted
+receipt** — case ids, descriptions, expectations, claim anchors, probe notes,
+measured string values, competitor requirements, and the reproducibility, spend,
+and metadata prose. Only the structural enum fields (`case_type`, `status`) are
+excluded, because they are machine vocabulary rather than published text. Each
+field is scanned under its own JSON path, so a violation names the exact field
+it came from. Absolute-promise vocabulary and whole-store secrecy phrasing must
+never appear; the NOT-claimed capability phrases may appear only in a disclaimer
+context or attached to the `NOT_CLAIMED` anchor. The scan is part of the receipt
+and part of the test gate.
+
+`tests/test_trust_benchmark.py` carries a **positive control** proving the scan
+actually reaches competitor requirement, reproducibility, and spend prose: it
+injects an overclaim into each of those fields and asserts the scan fires and
+names them. A scan that is clean only because it read a narrower surface than
+the published text is the precise failure this gate exists to prevent, and a
+test asserting that clean text stays clean would not have caught it.
 
 ---
 
@@ -91,9 +104,11 @@ part of the receipt and part of the test gate.
   editable source checkout.
 - **Deterministic models.** The harness injects Heartwood's own offline dev
   model pair (a hashing embedder + a lexical reranker — the same pair
-  Heartwood's test suite uses). Governance behavior is architecturally
-  independent of the embedder; retrieval *quality* is explicitly not measured.
-  This keeps every run offline and bit-reproducible.
+  Heartwood's test suite uses). This run *fixes* that model pair and does not
+  measure retrieval *quality*. No cross-embedder experiment was run, so this
+  run says nothing about how governance behavior would look under any other
+  embedder. Fixing the pair is what keeps every run offline and
+  bit-reproducible.
 - **Deterministic identity.** Fixed tenant, subjects, memory ids, and content
   (`fixtures.py`).
 - **Deterministic custody.** The Ed25519 root used for strict-mode probes is
@@ -118,11 +133,14 @@ semantically; the adapter knows how to execute it on its substrate.
 
 - **Heartwood adapter** (`heartwood_adapter.py`) is live.
 - **Competitor adapters** (`stubs.py`: Mem0, Zep, Supermemory) are honest
-  stubs. `session()` raises `AdapterNotAvailable`; each declares its
-  `capabilities()` (as `null` = "not independently verified in this run",
-  hypotheses, never claims) and `requirements()` (API surface, free-tier
-  status, signup/credential needs). Running any probe against a stub yields a
-  `SKIPPED` result, never a fabricated comparison.
+  stubs — a name, and nothing measured. `session()` raises
+  `AdapterNotAvailable`; `capabilities()` is uniformly `null` = "not measured in
+  this run"; `requirements()` states only that no adapter exists and that a live
+  adapter plus an owner-approved, funded run must come first. The stubs
+  deliberately publish **no** competitor API surface, free-tier posture, or
+  signup/credential detail: this run measured none of it, and a reader would
+  reasonably take such statements as a comparison. Running any probe against a
+  stub yields a `SKIPPED` result, never a fabricated comparison.
 
 **No comparative claim about a competitor exists in v1.** This run makes zero
 third-party network calls and requires zero new signups or credentials. A real
@@ -150,18 +168,24 @@ Stated plainly, in measured / evidence language, and consistent with the
    include a boundary case demonstrating that a raw database write can downgrade
    this metadata; that is the documented single-trust-domain assumption, not a
    recall-time defect. `NOT_CLAIMED: authorization_integrity`.
-3. **It does not measure byte-level content deletion.** The erasure probe
-   measures the key-destruction receipt and the crypto-erase-path proof under
-   the stated root-absence condition; it does not assert byte-level erasure.
-   `NOT_CLAIMED: db_compromise_resistance`.
+3. **It does not measure byte-level content deletion, and it publishes no
+   positive claim about what becomes of forgotten content.** The erasure probe
+   measures the key-destruction receipt (key shredded, derived artifacts purged,
+   erasure event retained on a chain that still verifies) and publishes the
+   boundary where the proof does *not* assert unrecoverability with the wrapping
+   root present. It does not assert byte-level erasure, and while finding F4 is
+   open it makes no positive claim that forgotten content is unreachable — a
+   post-forget recall observation and the root-absent unrecoverability proof were
+   both measured and both withheld from the published set for that reason.
+   `NOT_CLAIMED: db_compromise_resistance`. `NOT_CLAIMED: recall_exclusion`.
 4. **It does not claim recall exclusion under a database-write attacker.** The
    retirement probe measures removal from the answerable corpus through the
    sanctioned verbs, and publishes a boundary case where a raw column write
    removes a record with nothing on the audit log.
    `NOT_CLAIMED: recall_exclusion`.
 5. **It does not measure retrieval quality.** By construction (deterministic dev
-   embedder), ranking quality is out of scope. Governance behavior is
-   independent of the embedder.
+   embedder), ranking quality is out of scope. This run fixes one model pair and
+   does not measure whether governance behavior varies across embedders.
 6. **It does not measure the verification-root custody boundary.** Ordinary
    signature verification assumes the in-database key registry is trustworthy;
    the external-root custody path is out of scope for v1 (named in §6).
@@ -172,9 +196,10 @@ Stated plainly, in measured / evidence language, and consistent with the
 
 - **Faithfulness + egress gate** (the README's fifth receipt) — a sixth probe
   class for a later version.
-- **Real competitor runs** — Mem0 / Zep / Supermemory live adapters; each stub
-  names its requirements. Gated on owner sign-off at the first dollar / first
-  signup (the v1 run spends $0 and signs up for nothing).
+- **Real competitor runs** — Mem0 / Zep / Supermemory live adapters. Gated on
+  owner sign-off at the first dollar / first signup (the v1 run spends $0 and
+  signs up for nothing), and on legal review of any statement made about
+  another product.
 - **External verification-root custody** — measuring the anchored/custodied
   trust root that would move recall-decision metadata out of the mutable store.
 - **Scale / multi-tenant-at-scale** — the policy receipt notes multi-tenant

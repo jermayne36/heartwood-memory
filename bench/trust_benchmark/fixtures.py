@@ -6,9 +6,10 @@ Reproducibility contract
   ``heartwood.__version__`` matches the target release before running.
 - **Deterministic models**: the benchmark injects Heartwood's own sanctioned
   offline dev model pair (a hashing embedder + a lexical reranker, the same
-  pair Heartwood's test suite uses). Governance behavior is architecturally
-  independent of the embedder; retrieval *quality* is explicitly NOT measured.
-  This keeps every run offline and bit-reproducible.
+  pair Heartwood's test suite uses). This run *fixes* that model pair and does
+  NOT measure retrieval *quality*; no cross-embedder experiment was run, so it
+  says nothing about behavior under any other embedder. Fixing the pair is what
+  keeps every run offline and bit-reproducible.
 - **Deterministic identity**: fixed tenant, subjects, memory ids, and content.
 - **Deterministic custody**: the Ed25519 root used for strict-mode probes is
   derived at runtime from a fixed, public domain string via SHA-256 — no secret

@@ -384,7 +384,6 @@ def run_erasure(adapter: MemoryAdapter) -> ProbeResult:
         cases: list[Case] = []
         with adapter.session(strict="off", durable_custody=False) as s:
             _write(s, rec)
-            before = s.erase_proof(root_present=False)
             forget_receipt = s.forget(rec["subject"])
             cases.append(Case(
                 "erasure_forget_shreds_key", CONTRACT,
@@ -397,32 +396,15 @@ def run_erasure(adapter: MemoryAdapter) -> ProbeResult:
                 and (forget_receipt.get("purged") or 0) >= 1,
                 "content_provenance_authenticity"))
 
-            gone = s.recall(rec["cue"], reader=_LOW_READER).hit(rec["memory_id"])
-            cases.append(Case(
-                "erasure_content_unreachable_after_forget", CONTRACT,
-                "After a hard forget the subject's content is no longer returned "
-                "by recall.",
-                "record absent from recall after forget",
-                {"in_recall": gone is not None,
-                 "raw_active_keys_before": before.get("raw_active_key_count")},
-                gone is None, "content_provenance_authenticity"))
-
-            proof = s.erase_proof(root_present=False)
-            cases.append(Case(
-                "erasure_crypto_erase_proof", CONTRACT,
-                "prove_crypto_erase_path reports the subject key shredded and, "
-                "with the root absent, content unrecoverable.",
-                "content_unrecoverable=True, proved=True, raw_active_key_count=0, "
-                "shredded_key_count>=1",
-                {"content_unrecoverable": proof.get("content_unrecoverable"),
-                 "proved": proof.get("proved"),
-                 "raw_active_key_count": proof.get("raw_active_key_count"),
-                 "shredded_key_count": proof.get("shredded_key_count")},
-                proof.get("content_unrecoverable") is True
-                and proof.get("proved") is True
-                and proof.get("raw_active_key_count") == 0
-                and (proof.get("shredded_key_count") or 0) >= 1,
-                "content_provenance_authenticity"))
+            # Two further cases previously ran here and are WITHDRAWN from the
+            # published set: a post-forget recall observation, and the
+            # root-absent crypto-erase proof asserting content unrecoverable.
+            # Both were measured and both held, but publishing either states a
+            # recall-exclusion / content-unrecoverability property that Nina
+            # Ruling 3 withholds while finding F4 is open. They are withheld,
+            # not softened and not re-anchored: re-add them verbatim if and when
+            # a ruling authorizes the narrowly conditioned erasure claim.
+            # See bench/DESIGN.md §5.3.
 
             audited = s.audit_action_present(rec["subject"], "forget")
             cases.append(Case(
