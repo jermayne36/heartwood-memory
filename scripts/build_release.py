@@ -143,7 +143,11 @@ def verify_manifest(path: Path) -> None:
 
 
 def main() -> None:
-    version = assert_versions_match(ROOT / "pyproject.toml", ROOT / "heartwood" / "__init__.py")
+    version = assert_versions_match(
+        ROOT / "pyproject.toml",
+        ROOT / "heartwood" / "__init__.py",
+        ROOT / "server.json",
+    )
     print(f"Version guard passed: {version}")
     artifacts = build_distributions()
     manifest = write_manifest(artifacts)
