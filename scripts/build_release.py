@@ -16,6 +16,7 @@ from check_version import assert_versions_match
 
 ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
+PUBLIC_KEY_NAME = "heartwood-release-public-key.txt"
 
 
 def _b64e(data: bytes) -> str:
@@ -58,7 +59,8 @@ def signing_key() -> tuple[ed25519.Ed25519PrivateKey, str]:
     raw = os.environ.get("HEARTWOOD_RELEASE_SIGNING_KEY_B64")
     if raw:
         return ed25519.Ed25519PrivateKey.from_private_bytes(_b64d(raw)[:32]), "env"
-    return ed25519.Ed25519PrivateKey.generate(), "ephemeral-local"
+    source = "ephemeral-ci" if os.environ.get("GITHUB_ACTIONS") == "true" else "ephemeral-local"
+    return ed25519.Ed25519PrivateKey.generate(), source
 
 
 def sha256(path: Path) -> str:
@@ -92,6 +94,7 @@ def write_manifest(artifacts: list[Path]) -> Path:
         encoding=serialization.Encoding.Raw,
         format=serialization.PublicFormat.Raw,
     )
+    (DIST / PUBLIC_KEY_NAME).write_text(_b64e(public_key) + "\n", encoding="utf-8")
     files = [
         {
             "path": str(path.relative_to(ROOT)).replace("\\", "/"),
@@ -113,7 +116,8 @@ def write_manifest(artifacts: list[Path]) -> Path:
             "key_source": key_source,
             "note": (
                 "Use HEARTWOOD_RELEASE_SIGNING_KEY_B64 for production releases. "
-                "ephemeral-local proves artifact integrity for local verification only."
+                "Ephemeral keys prove artifact integrity for one CI/local release only "
+                "and rotate until the production trust root is established."
             ),
         },
     }
@@ -156,6 +160,7 @@ def main() -> None:
     for path in artifacts:
         print(f"- {path}")
     print(f"- {manifest}")
+    print(f"- {DIST / PUBLIC_KEY_NAME}")
 
 
 if __name__ == "__main__":

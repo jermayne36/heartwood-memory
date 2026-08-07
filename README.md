@@ -148,6 +148,7 @@ Governance you can inspect and re-run at the record level:
 - [Multi-agent identity](docs/security/multi-agent-identity.md)
 - [Postgres and SQLite migration guide](docs/migration/postgres-sqlite-migration-guide.md)
 - [Full public documentation map](docs/README.md)
+- [Release verification and publishing](docs/release/python-package-release.md)
 
 Run the console script after installation:
 
