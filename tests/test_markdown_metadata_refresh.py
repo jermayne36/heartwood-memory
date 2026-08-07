@@ -186,7 +186,6 @@ def test_unknown_and_human_approved_truth_status_fail_closed(tmp_path, monkeypat
 
 
 def test_metadata_update_rejects_invalid_values_without_row_or_audit_change(tmp_path, monkeypatch):
-    """@fail-closed Invalid metadata cannot reach the row or audit chain."""
     _set_custody_env(monkeypatch)
     db = _client(tmp_path / "heartwood.db")
     try:
@@ -213,7 +212,7 @@ def test_metadata_update_rejects_invalid_values_without_row_or_audit_change(tmp_
                 )
         assert db.store.get_meta(mem_id) == before
         assert len(db.store.audit_rows_for_target(mem_id)) == audit_before
-        with pytest.raises(PermissionError, match="requires approve"):
+        with pytest.raises(PermissionError, match="approval lifecycle"):
             db.update_substrate_metadata(
                 mem_id,
                 valid_from=None,
@@ -229,7 +228,7 @@ def test_metadata_update_rejects_invalid_values_without_row_or_audit_change(tmp_
 
 
 def test_future_valid_from_positive_control_fails_the_write(tmp_path, monkeypatch):
-    """@positive-control A future visibility bound must fire the guard."""
+    """@positive-control(substrate-metadata-future-valid-from)"""
     _set_custody_env(monkeypatch)
     db = _client(tmp_path / "heartwood.db")
     try:
@@ -252,6 +251,183 @@ def test_future_valid_from_positive_control_fails_the_write(tmp_path, monkeypatc
         assert len(db.store.audit_rows_for_target(mem_id)) == audit_before
     finally:
         db.close()
+
+
+def test_human_approved_demotion_fails_direct_and_markdown_paths(tmp_path, monkeypatch):
+    """@positive-control(human-approved-boundary)"""
+    _set_custody_env(monkeypatch)
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    source = memory / "project_approved_fixture.md"
+    source.write_text(_frontmatter(), encoding="utf-8")
+    db_path = tmp_path / "heartwood.db"
+    first = _import(memory, db_path)
+    mem_id = first["imported"][0]["id"]
+
+    db = _client(db_path)
+    try:
+        db.approve(
+            mem_id,
+            db.principal("user:approver", roles=("approver",)),
+        )
+        approved = db.store.get_meta(mem_id)
+        audit_count = len(db.store.audit_rows_for_target(mem_id))
+        with pytest.raises(PermissionError, match="approval lifecycle"):
+            db.update_substrate_metadata(
+                mem_id,
+                valid_from=approved["valid_from"],
+                valid_until=approved["valid_until"],
+                entities=approved["entities"],
+                truth_status="inferred",
+                actor="agent:markdown-importer",
+            )
+        assert db.store.get_meta(mem_id) == approved
+        assert len(db.store.audit_rows_for_target(mem_id)) == audit_count
+    finally:
+        db.close()
+
+    source.write_text(_frontmatter(truth_status="inferred"), encoding="utf-8")
+    report = _import(memory, db_path, update=True)
+    assert report["ok"] is False
+    assert report["updated_count"] == 0
+    assert report["purged_count"] == 0
+    assert "approval lifecycle" in report["errors"][0]["error"]
+
+    db = _client(db_path)
+    try:
+        assert db.store.get_meta(mem_id) == approved
+        assert len(db.store.audit_rows_for_target(mem_id)) == audit_count
+    finally:
+        db.close()
+
+
+def _contextual_refresh_fixture(
+    tmp_path,
+    monkeypatch,
+):
+    _set_custody_env(monkeypatch)
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    source = memory / "project_contextual_fixture.md"
+    source.write_text(_frontmatter(), encoding="utf-8")
+    db_path = tmp_path / "heartwood.db"
+
+    def fake_generator(**_kwargs):
+        return "Metadata fixture context supported by the source."
+
+    contextual = {
+        "contextual_threshold_tokens": 1,
+        "contextual_generator": fake_generator,
+        "contextual_target_tokens": 7,
+        "contextual_overlap": 0,
+    }
+    first = _import(memory, db_path, **contextual)
+    chunk_ids = tuple(row["id"] for row in first["imported"])
+    context_ids = tuple(row["context_id"] for row in first["imported"])
+    assert chunk_ids
+
+    db = _client(db_path)
+    try:
+        edges_before = tuple(
+            db.store.conn.execute(
+                "SELECT child, parent, kind FROM prov_edges ORDER BY child, parent, kind"
+            ).fetchall()
+        )
+    finally:
+        db.close()
+
+    source.write_text(
+        _frontmatter(
+            valid_from="2026-01-15",
+            entities=["Heartwood", "Contextual"],
+            truth_status="inferred",
+        ),
+        encoding="utf-8",
+    )
+    refreshed = _import(memory, db_path, update=True, **contextual)
+
+    db = _client(db_path)
+    try:
+        chunk_meta = tuple(db.store.get_meta(chunk_id) for chunk_id in chunk_ids)
+        context_meta = tuple(db.store.get_meta(context_id) for context_id in context_ids)
+        edges_after = tuple(
+            db.store.conn.execute(
+                "SELECT child, parent, kind FROM prov_edges ORDER BY child, parent, kind"
+            ).fetchall()
+        )
+    finally:
+        db.close()
+    return {
+        "chunk_ids": chunk_ids,
+        "context_ids": context_ids,
+        "chunk_meta": chunk_meta,
+        "context_meta": context_meta,
+        "edges_before": edges_before,
+        "edges_after": edges_after,
+        "refreshed": refreshed,
+    }
+
+
+def test_contextual_rows_receive_validity_and_entities_refresh(tmp_path, monkeypatch):
+    result = _contextual_refresh_fixture(tmp_path, monkeypatch)
+    refreshed = result["refreshed"]
+    assert refreshed["imported_count"] == 0
+    assert refreshed["updated_count"] == len(result["chunk_ids"]) + len(result["context_ids"])
+    assert refreshed["purged_count"] == 0
+    for meta in result["chunk_meta"] + result["context_meta"]:
+        assert meta["valid_from"] == "2026-01-15T00:00:00+00:00"
+        assert meta["entities"] == ("Heartwood", "Contextual")
+    assert result["edges_after"] == result["edges_before"]
+
+
+def test_contextual_truth_status_is_not_overwritten(tmp_path, monkeypatch):
+    result = _contextual_refresh_fixture(tmp_path, monkeypatch)
+    assert all(meta["truth_status"] == "inferred" for meta in result["chunk_meta"])
+    assert all(
+        meta["truth_status"] == "generated_supported"
+        for meta in result["context_meta"]
+    )
+
+
+def test_contextual_pinned_memory_id_reimports_instead_of_metadata_refresh(tmp_path, monkeypatch):
+    _set_custody_env(monkeypatch)
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    source = memory / "project_contextual_pinned_fixture.md"
+    source.write_text(
+        _frontmatter().replace(
+            "epistemic: model-generated",
+            "epistemic: model-generated\nmemory_id: contextual_pinned_fixture",
+        ),
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "heartwood.db"
+
+    def fake_generator(**_kwargs):
+        return "Metadata fixture context supported by the source."
+
+    contextual = {
+        "contextual_threshold_tokens": 1,
+        "contextual_generator": fake_generator,
+        "contextual_target_tokens": 7,
+        "contextual_overlap": 0,
+    }
+    first = _import(memory, db_path, **contextual)
+    first_ids = {
+        item_id
+        for row in first["imported"]
+        for item_id in (row["id"], row["context_id"])
+    }
+    refreshed = _import(memory, db_path, update=True, **contextual)
+
+    assert refreshed["updated_count"] == 0
+    assert refreshed["purged_count"] == len(first_ids)
+    assert refreshed["imported_count"] == len(first["imported"])
+    assert {
+        item_id
+        for row in refreshed["imported"]
+        for item_id in (row["id"], row["context_id"])
+    } == first_ids
 
 
 def test_audit_append_failure_rolls_back_metadata_update(tmp_path, monkeypatch):

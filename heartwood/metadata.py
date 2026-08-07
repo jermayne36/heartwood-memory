@@ -35,6 +35,7 @@ def normalize_substrate_metadata(
     normalized_from = normalize_metadata_instant(valid_from, field="valid_from")
     normalized_until = normalize_metadata_instant(valid_until, field="valid_until")
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    # @fail-closed(substrate-metadata-future-valid-from)
     if normalized_from is not None and datetime.fromisoformat(normalized_from) > current:
         raise ValueError(
             "valid_from cannot be in the future because it would hide the memory "

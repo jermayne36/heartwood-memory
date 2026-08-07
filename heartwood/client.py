@@ -1153,11 +1153,16 @@ class Heartwood:
             entities=entities,
             truth_status=(truth_status if truth_status is not None else meta["truth_status"]),
         )
+        # @fail-closed(human-approved-boundary)
         if (
             target["truth_status"] == "human_approved"
-            and meta["truth_status"] != "human_approved"
+        ) != (
+            meta["truth_status"] == "human_approved"
         ):
-            raise PermissionError("human_approved requires approve(), not metadata update")
+            raise PermissionError(
+                "crossing the human_approved boundary requires the approval lifecycle, "
+                "not a metadata update"
+            )
         before = {
             "valid_from": meta["valid_from"],
             "valid_until": meta["valid_until"],
