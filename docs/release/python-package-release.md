@@ -105,6 +105,7 @@ Built release artifacts:
 - .../dist/heartwood_memory-X.Y.Z-py3-none-any.whl
 - .../dist/heartwood_memory-X.Y.Z.tar.gz
 - .../dist/heartwood-memory-release-manifest.json
+- .../dist/heartwood-release-public-key.txt
 ```
 
 `scripts/build_release.py` verifies its Ed25519 signature and every recorded
@@ -150,10 +151,32 @@ manifest_file=dist/...whl sha256=<64 hex> parity=MATCH
 manifest_file=dist/...tar.gz sha256=<64 hex> parity=MATCH
 ```
 
+### Customer verification (three lines)
+
+Each tagged CI release publishes the signed manifest and its public key beside
+the GitHub release, while the wheel remains on PyPI. A customer can verify the
+downloaded wheel without an account or support contact:
+
+```bash
+export RELEASE_VERSION="X.Y.Z" VERIFY_DIR="$(mktemp -d)"; python3.11 -m pip download --quiet --only-binary=:all: --no-deps --dest "$VERIFY_DIR" "heartwood-memory==$RELEASE_VERSION"
+curl -fsSLo "$VERIFY_DIR/manifest.json" "https://github.com/jermayne36/heartwood-memory/releases/download/v${RELEASE_VERSION}/heartwood-memory-release-manifest.json" && curl -fsSLo "$VERIFY_DIR/public-key.txt" "https://github.com/jermayne36/heartwood-memory/releases/download/v${RELEASE_VERSION}/heartwood-release-public-key.txt"
+python3.11 -m pip install --quiet --target "$VERIFY_DIR/site" "cryptography>=42" "$VERIFY_DIR"/heartwood_memory-*.whl && PYTHONPATH="$VERIFY_DIR/site" python3.11 -m heartwood.release_verify --manifest "$VERIFY_DIR/manifest.json" --public-key "$VERIFY_DIR/public-key.txt" --artifact "$VERIFY_DIR"/heartwood_memory-*.whl
+```
+
+Expected output starts with `VERIFIED heartwood_memory-X.Y.Z-...whl` and its
+SHA-256 digest. Until the Rule-45-approved production trust root is established,
+the published key is explicitly **ephemeral and rotates on every release**. It
+therefore proves that the wheel matches that release's signed manifest, not
+long-lived publisher identity. After the approved key is registered as the
+`HEARTWOOD_RELEASE_SIGNING_KEY_B64` Actions secret, these same three lines and
+the workflow remain unchanged; only the published key becomes stable and
+customer-pinnable.
+
 `HEARTWOOD_RELEASE_SIGNING_KEY_B64`, when already configured from an approved
 secure source, makes `manifest_key_source=env`. Without it, the builder uses an
-ephemeral local key. Never create, rotate, or replace a signing key during a
-release without the credential-change approval and rollback plan.
+ephemeral local key or an `ephemeral-ci` key inside GitHub Actions. Never create,
+rotate, or replace a signing key during a release without the credential-change
+approval and rollback plan.
 
 ## 3. Check metadata and scan the public artifacts
 
