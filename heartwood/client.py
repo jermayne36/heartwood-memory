@@ -7,6 +7,7 @@ audit log. Embedded, in-process, tenant-scoped.
 from __future__ import annotations
 
 import base64
+import json
 import os
 import re
 import time
@@ -27,6 +28,7 @@ from .key_lifecycle import (
     rewrap_tenant_keys,
     rotate_tenant_root,
 )
+from .metadata import normalize_substrate_metadata
 from .policy import Principal, PolicyEnforcer
 from .provenance import Signer, chain, verify_meta
 from .retrieval import (
@@ -71,6 +73,7 @@ _MIRROR_FAMILY_SOURCE = re.compile(
     r"^markdown://(?P<root>memory|team-memory|team_memory)/(?P<name>.+)$",
     re.IGNORECASE,
 )
+_SUBSTRATE_METADATA_SIGNATURE_DOMAIN = b"heartwood:substrate-metadata-update:v1\0"
 
 
 def _mirror_family(meta: dict) -> tuple[str, int] | None:
@@ -1117,6 +1120,122 @@ class Heartwood:
                           {"from": from_value, "to": normalized, "reason": reason})
         return {"id": mem_id, "from": from_value, "to": normalized,
                 "valid_now": valid_at({**meta, "valid_until": normalized}, _utc_now_iso())}
+
+    def update_substrate_metadata(
+        self,
+        mem_id,
+        *,
+        valid_from,
+        valid_until,
+        entities,
+        truth_status=None,
+        actor,
+        reason="",
+    ):
+        """Update typed metadata in place through a signed, audited CAS write.
+
+        The memory id, content, producer envelope, embeddings, and provenance
+        edges are immutable.  The actor signs the complete before/after change;
+        the row mutation and audit append commit in one SQLite transaction.
+        """
+        if not isinstance(actor, str) or not actor.strip():
+            raise ValueError("actor must be a non-empty principal id")
+        if not isinstance(reason, str):
+            raise TypeError("reason must be a string")
+        meta = self.store.get_meta(mem_id)
+        if not meta:
+            raise KeyError(f"unknown memory id: {mem_id}")
+        if meta["tenant"] != self.tenant:
+            raise KeyError(f"unknown memory id: {mem_id}")
+        target = normalize_substrate_metadata(
+            valid_from=valid_from,
+            valid_until=valid_until,
+            entities=entities,
+            truth_status=(truth_status if truth_status is not None else meta["truth_status"]),
+        )
+        # @fail-closed(human-approved-boundary)
+        if (
+            target["truth_status"] == "human_approved"
+        ) != (
+            meta["truth_status"] == "human_approved"
+        ):
+            raise PermissionError(
+                "crossing the human_approved boundary requires the approval lifecycle, "
+                "not a metadata update"
+            )
+        before = {
+            "valid_from": meta["valid_from"],
+            "valid_until": meta["valid_until"],
+            "entities": tuple(meta["entities"]),
+            "truth_status": meta["truth_status"],
+        }
+        signed_change = {
+            "tenant": self.tenant,
+            "memory_id": mem_id,
+            "content_hash": meta["content_hash"],
+            "actor": actor,
+            "from": {**before, "entities": list(before["entities"])},
+            "to": {**target, "entities": list(target["entities"])},
+            "reason": reason,
+        }
+        signed_bytes = json.dumps(
+            signed_change,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        update_signature = self.signer.sign_detached(
+            actor,
+            signed_bytes,
+            domain=_SUBSTRATE_METADATA_SIGNATURE_DOMAIN,
+        )
+        if not self.signer.verify_detached(
+            update_signature,
+            actor,
+            signed_bytes,
+            domain=_SUBSTRATE_METADATA_SIGNATURE_DOMAIN,
+        ):
+            raise RuntimeError("substrate metadata update signature failed verification")
+        detail = {**signed_change, "update_signature": update_signature}
+        audit_body = json.dumps(
+            {
+                "tenant": self.tenant,
+                "principal": actor,
+                "action": "substrate_metadata",
+                "target": mem_id,
+                "detail": detail,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        transition = self.store.update_substrate_metadata_audited(
+            mem_id,
+            valid_from=target["valid_from"],
+            valid_until=target["valid_until"],
+            entities=target["entities"],
+            truth_status=target["truth_status"],
+            expected_from=before,
+            expected_content_hash=meta["content_hash"],
+            tenant=self.tenant,
+            principal=actor,
+            action="substrate_metadata",
+            audit_body=audit_body,
+        )
+        if transition is None:
+            current = self.store.get_meta(mem_id)
+            raise RuntimeError(
+                "substrate metadata changed during update: "
+                f"expected {before!r}, got {current!r}"
+            )
+        if self.audit.after_append is not None:
+            self.audit.after_append()
+        return {
+            "id": mem_id,
+            "from": before,
+            "to": target,
+            "audit_seq": transition["seq"],
+            "audit_row_hash": transition["row_hash"],
+            "update_signature": update_signature,
+        }
 
     def forget(self, subject, *, mode="hard", actor="system", reason="", legal_basis=""):
         purged = 0

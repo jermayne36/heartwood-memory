@@ -20,6 +20,7 @@ class ContextualDocument:
     created_by: str
     kind: str = Kind.SOURCE.value
     epistemic: str = Epistemic.IMPORTED_SOURCE.value
+    truth_status: str | None = None
     confidence: float = 0.9
     salience: float = 0.6
     source: dict[str, Any] = field(default_factory=dict)
@@ -140,6 +141,7 @@ def ingest_contextual(
             created_by=document.created_by,
             kind=document.kind,
             epistemic=document.epistemic,
+            truth_status=document.truth_status,
             confidence=document.confidence,
             salience=document.salience,
             source=_source(document, chunk),
@@ -242,6 +244,7 @@ def _fallback_whole_file(client, document: ContextualDocument, reason: str) -> I
         created_by=document.created_by,
         kind=document.kind,
         epistemic=document.epistemic,
+        truth_status=document.truth_status,
         confidence=document.confidence,
         salience=document.salience,
         source={**document.source, "uri": _source_uri(document)},
