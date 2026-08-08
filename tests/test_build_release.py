@@ -51,7 +51,7 @@ def test_customer_verifier_rejects_a_key_or_artifact_mismatch(tmp_path, monkeypa
     monkeypatch.syspath_prepend(str(SCRIPT.parent))
     monkeypatch.delenv("HEARTWOOD_RELEASE_SIGNING_KEY_B64", raising=False)
     release = load_build_release()
-    from heartwood.release_verify import verify_release
+    from heartwood.release_verify import public_key_fingerprint, verify_release
 
     root = tmp_path / "release"
     dist = root / "dist"
@@ -63,21 +63,37 @@ def test_customer_verifier_rejects_a_key_or_artifact_mismatch(tmp_path, monkeypa
     manifest = release.write_manifest([wheel])
     public_key = dist / release.PUBLIC_KEY_NAME
 
-    verify_release(manifest, public_key, [wheel])
+    original_key = public_key.read_text(encoding="utf-8").strip()
+    trusted_fingerprint = public_key_fingerprint(release._b64d(original_key))
+    verify_release(
+        manifest,
+        public_key,
+        [wheel],
+        trusted_public_key_fingerprint=trusted_fingerprint,
+    )
 
-    original_key = public_key.read_text(encoding="utf-8")
     public_key.write_text(base64.urlsafe_b64encode(b"x" * 32).decode("ascii") + "\n", encoding="utf-8")
     try:
-        verify_release(manifest, public_key, [wheel])
+        verify_release(
+            manifest,
+            public_key,
+            [wheel],
+            trusted_public_key_fingerprint=trusted_fingerprint,
+        )
     except RuntimeError as error:
-        assert "public key does not match" in str(error)
+        assert "trusted fingerprint" in str(error)
     else:
         raise AssertionError("mismatched public key unexpectedly verified")
-    public_key.write_text(original_key, encoding="utf-8")
+    public_key.write_text(original_key + "\n", encoding="utf-8")
 
     wheel.write_bytes(b"tampered")
     try:
-        verify_release(manifest, public_key, [wheel])
+        verify_release(
+            manifest,
+            public_key,
+            [wheel],
+            trusted_public_key_fingerprint=trusted_fingerprint,
+        )
     except RuntimeError as error:
         assert "checksum mismatch" in str(error)
     else:

@@ -24,8 +24,6 @@ jobs:
   build-sign-verify:
     runs-on: ubuntu-latest
     env:
-      # Empty today: the builder deliberately falls back to an ephemeral CI key.
-      # After the Rule-45 ceremony, registering this existing secret is the only cutover.
       HEARTWOOD_RELEASE_SIGNING_KEY_B64: ${{ secrets.HEARTWOOD_RELEASE_SIGNING_KEY_B64 }}
     steps:
       - uses: actions/checkout@v4
@@ -48,9 +46,12 @@ jobs:
         run: python scripts/build_release.py
       - name: Verify published-key boundary and package metadata
         run: |
+          test -n "$HEARTWOOD_RELEASE_SIGNING_KEY_B64"
+          cmp dist/heartwood-release-public-key.txt docs/release/heartwood-release-public-key-v1.txt
           python -m heartwood.release_verify \
             --manifest dist/heartwood-memory-release-manifest.json \
             --public-key dist/heartwood-release-public-key.txt \
+            --public-key-fingerprint "$(cat docs/release/heartwood-release-public-key-v1.sha256)" \
             --artifact dist/heartwood_memory-*.whl \
             --artifact dist/heartwood_memory-*.tar.gz
           python -m twine check dist/heartwood_memory-*.whl dist/heartwood_memory-*.tar.gz
