@@ -144,6 +144,7 @@ Governance you can inspect and re-run at the record level:
 - [Onboarding guide](docs/integrations/onboarding-guide.md)
 - [Python API reference](docs/api/python-api.md)
 - [Strict mode and audit-anchor quickstart](docs/api/strict-mode-and-audit-anchor-quickstart.md)
+- [Signed audit export and offline verifier](docs/api/signed-audit-export.md)
 - [Key custody and erasure](docs/security/key-custody.md)
 - [Multi-agent identity](docs/security/multi-agent-identity.md)
 - [Postgres and SQLite migration guide](docs/migration/postgres-sqlite-migration-guide.md)

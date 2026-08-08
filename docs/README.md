@@ -10,6 +10,7 @@ as needed.
 - [Customer implementation guide](integrations/customer-implementation-guide.md)
 - [Python API reference](api/python-api.md)
 - [Strict mode and audit-anchor quickstart](api/strict-mode-and-audit-anchor-quickstart.md)
+- [Signed audit export](api/signed-audit-export.md)
 - [Recall visibility and record retirement](api/recall-visibility-and-retirement.md)
 - [Platform support](platform-support.md)
 

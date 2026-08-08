@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from .anchors import LocalFileAnchorSink, verify_chain_against_anchors
+from .audit_bundle import export_audit_bundle, verify_audit_bundle
 from .client import Heartwood
 from .importers.edges import import_edges
 from .importers.markdown import dev_models, import_markdown_corpus
@@ -339,6 +340,36 @@ def cmd_verify_audit(args: argparse.Namespace) -> dict:
         )
     finally:
         store.close()
+
+
+def cmd_export_audit(args: argparse.Namespace) -> dict:
+    roots = (
+        args.anchor_root_fingerprint
+        or os.environ.get("HEARTWOOD_ANCHOR_ROOT_FINGERPRINT")
+    )
+    if not roots:
+        raise ValueError(
+            "export-audit requires --anchor-root-fingerprint or "
+            "HEARTWOOD_ANCHOR_ROOT_FINGERPRINT"
+        )
+    return export_audit_bundle(
+        db_path=args.db,
+        anchors_path=args.anchors,
+        out_path=args.out,
+        trusted_root_fingerprints=roots,
+        anchor_sink_id=args.anchor_sink_id,
+    )
+
+
+def cmd_verify_audit_bundle(args: argparse.Namespace) -> dict:
+    roots = (
+        args.anchor_root_fingerprint
+        or os.environ.get("HEARTWOOD_ANCHOR_ROOT_FINGERPRINT")
+    )
+    return verify_audit_bundle(
+        args.bundle,
+        trusted_root_fingerprints=roots,
+    )
 
 
 def cmd_bench_recall(args: argparse.Namespace) -> dict:
@@ -761,6 +792,53 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     verify_audit.add_argument("--output", type=Path)
     verify_audit.set_defaults(handler=cmd_verify_audit)
 
+    export_audit = subparsers.add_parser(
+        "export-audit",
+        help="Export the fully anchored audit prefix as an offline-verifiable bundle.",
+    )
+    export_audit.add_argument(
+        "--db",
+        type=Path,
+        default=Path(os.environ.get("HEARTWOOD_DB_PATH", "heartwood.db")),
+        help="Source Heartwood SQLite database (default: HEARTWOOD_DB_PATH or heartwood.db).",
+    )
+    export_audit.add_argument(
+        "--anchors",
+        type=Path,
+        default=Path(
+            os.environ.get("HEARTWOOD_ANCHOR_PATH", "heartwood-audit-anchors.jsonl")
+        ),
+        help="Signed AnchorSink JSONL path (default: HEARTWOOD_ANCHOR_PATH).",
+    )
+    export_audit.add_argument(
+        "--anchor-sink-id",
+        help="Stable sink identity; defaults to a digest of the resolved local path.",
+    )
+    export_audit.add_argument(
+        "--anchor-root-fingerprint",
+        action="append",
+        help="Externally pinned sha256 fingerprint; repeat for historical roots.",
+    )
+    export_audit.add_argument("--out", type=Path, required=True)
+    export_audit.add_argument("--output", type=Path)
+    export_audit.set_defaults(handler=cmd_export_audit)
+
+    verify_bundle = subparsers.add_parser(
+        "verify-audit-bundle",
+        help="Verify a portable signed audit bundle with no database or network access.",
+    )
+    verify_bundle.add_argument("bundle", type=Path)
+    verify_bundle.add_argument(
+        "--anchor-root-fingerprint",
+        action="append",
+        help=(
+            "Separately pinned sha256 fingerprint; repeat for historical roots. "
+            "If omitted, reports bundle_manifest trust."
+        ),
+    )
+    verify_bundle.add_argument("--output", type=Path)
+    verify_bundle.set_defaults(handler=cmd_verify_audit_bundle)
+
     bench = subparsers.add_parser(
         "bench-recall",
         help="Measure warm recall latency and optionally require the p95 SLO.",
@@ -791,7 +869,7 @@ def main(argv: list[str] | None = None) -> None:
         print(f"heartwood error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
     write_output(args, payload)
-    if args.handler is cmd_verify_audit and payload.get("ok") is not True:
+    if args.handler in {cmd_verify_audit, cmd_verify_audit_bundle} and payload.get("ok") is not True:
         raise SystemExit(2)
     if (
         isinstance(payload, dict)
