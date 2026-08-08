@@ -366,10 +366,14 @@ def cmd_verify_audit_bundle(args: argparse.Namespace) -> dict:
         args.anchor_root_fingerprint
         or os.environ.get("HEARTWOOD_ANCHOR_ROOT_FINGERPRINT")
     )
+    expected_latest_anchor_id = (
+        args.expected_latest_anchor_id
+        or os.environ.get("HEARTWOOD_EXPECTED_LATEST_ANCHOR_ID")
+    )
     return verify_audit_bundle(
         args.bundle,
         trusted_root_fingerprints=roots,
-        expected_latest_anchor_id=args.expected_latest_anchor_id,
+        expected_latest_anchor_id=expected_latest_anchor_id,
     )
 
 
@@ -841,7 +845,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--expected-latest-anchor-id",
         help=(
             "Latest anchor ID obtained through a separate trusted channel; "
-            "required for PASS and rollback detection."
+            "required for PASS and rollback detection. Falls back to "
+            "HEARTWOOD_EXPECTED_LATEST_ANCHOR_ID."
         ),
     )
     verify_bundle.add_argument("--output", type=Path)

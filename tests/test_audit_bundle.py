@@ -20,7 +20,24 @@ ROOT = bytes([117]) * 32
 CUSTODIAN = LocalKmsCustodian(ROOT, key_id="audit-bundle-test-root-v1")
 
 
-def _anchored_store(tmp_path):
+def _write_bundle(path, manifest, rows, records):
+    audit_bytes = audit_bundle_module._jsonl_bytes(rows)
+    anchor_bytes = audit_bundle_module._jsonl_bytes(records)
+    manifest["files"] = {
+        "audit.jsonl": audit_bundle_module._file_receipt(audit_bytes),
+        "anchors.jsonl": audit_bundle_module._file_receipt(anchor_bytes),
+    }
+    audit_bundle_module._write_archive_atomic(
+        path,
+        {
+            "manifest.json": audit_bundle_module._canonical_bytes(manifest) + b"\n",
+            "audit.jsonl": audit_bytes,
+            "anchors.jsonl": anchor_bytes,
+        },
+    )
+
+
+def _anchored_store(tmp_path, *, actions=("remember",)):
     db_path = tmp_path / "heartwood.db"
     anchors_path = tmp_path / "anchors.jsonl"
     store = Store(db_path)
@@ -39,13 +56,14 @@ def _anchored_store(tmp_path):
         interval_s=300,
     )
     audit = AuditLog(store, after_append=writer.maybe_anchor)
-    audit.append(
-        "tenant:audit",
-        "agent:test",
-        "remember",
-        "memory:1",
-        {"classification": "internal"},
-    )
+    for index, action in enumerate(actions, start=1):
+        audit.append(
+            "tenant:audit",
+            "agent:test",
+            action,
+            f"memory:{index}",
+            {"classification": "internal"},
+        )
     writer.close()
     store.close()
     return db_path, anchors_path, fingerprint
@@ -138,7 +156,97 @@ def test_external_root_and_checkpoint_are_required_for_pass(tmp_path, capsys):
     assert verified["ok"] is True
 
 
+def test_checkpoint_env_fallback_allows_verified_pass(tmp_path, monkeypatch, capsys):
+    db_path, anchors_path, fingerprint = _anchored_store(tmp_path)
+    bundle = tmp_path / "bundle.tar.gz"
+    exported = export_audit_bundle(
+        db_path=db_path,
+        anchors_path=anchors_path,
+        out_path=bundle,
+        trusted_root_fingerprints=fingerprint,
+    )
+    monkeypatch.setenv("HEARTWOOD_ANCHOR_ROOT_FINGERPRINT", fingerprint)
+    monkeypatch.setenv(
+        "HEARTWOOD_EXPECTED_LATEST_ANCHOR_ID", exported["latest_anchor_id"]
+    )
+
+    cli_main(["verify-audit-bundle", str(bundle)])
+
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["status"] == "PASS"
+    assert receipt["ok"] is True
+
+
+def test_correctly_hash_chained_unsigned_tail_fails_closed(tmp_path):
+    # @positive-control(audit-bundle-unanchored-tail)
+    db_path, anchors_path, fingerprint = _anchored_store(tmp_path)
+    bundle = tmp_path / "bundle.tar.gz"
+    exported = export_audit_bundle(
+        db_path=db_path,
+        anchors_path=anchors_path,
+        out_path=bundle,
+        trusted_root_fingerprints=fingerprint,
+    )
+    members = audit_bundle_module._read_archive(bundle)
+    manifest = audit_bundle_module._load_canonical_json(
+        members["manifest.json"], "manifest.json"
+    )
+    rows = audit_bundle_module._parse_jsonl(members["audit.jsonl"], "audit.jsonl")
+    records = audit_bundle_module._parse_jsonl(
+        members["anchors.jsonl"], "anchors.jsonl"
+    )
+    body = json.dumps(
+        {
+            "action": "forged-tail",
+            "detail": {},
+            "principal": "agent:attacker",
+            "target": "event:unsigned",
+            "tenant": "tenant:audit",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    timestamp = float(rows[-1]["ts"])
+    previous_hash = rows[-1]["row_hash"]
+    forged = {
+        "seq": int(rows[-1]["seq"]) + 1,
+        "ts": timestamp,
+        "tenant": "tenant:audit",
+        "principal": "agent:attacker",
+        "action": "forged-tail",
+        "target": "event:unsigned",
+        "body": body,
+        "prev_hash": previous_hash,
+        "row_hash": hashlib.sha256(
+            (previous_hash + body + repr(timestamp)).encode()
+        ).hexdigest(),
+    }
+    rows.append(forged)
+    manifest["chain"].update(
+        {
+            "last_seq": forged["seq"],
+            "row_count": len(rows),
+            "last_row_hash": forged["row_hash"],
+            "source_current_seq": forged["seq"],
+            "excluded_unanchored_rows": 0,
+        }
+    )
+    forged_bundle = tmp_path / "forged-tail.tar.gz"
+    _write_bundle(forged_bundle, manifest, rows, records)
+
+    receipt = verify_audit_bundle(
+        forged_bundle,
+        trusted_root_fingerprints=fingerprint,
+        expected_latest_anchor_id=exported["latest_anchor_id"],
+    )
+    assert receipt["ok"] is False
+    assert receipt["first_failure"] == "unsigned_rows_after_latest_anchor"
+    assert receipt["rows_since_success"] == 1
+    assert receipt["last_success_seq"] == 1
+
+
 def test_earlier_signed_prefix_fails_against_external_latest_checkpoint(tmp_path):
+    # @positive-control(audit-bundle-checkpoint-mismatch)
     db_path = tmp_path / "heartwood.db"
     anchors_path = tmp_path / "anchors.jsonl"
     store = Store(db_path)
@@ -240,6 +348,153 @@ def test_earlier_signed_prefix_fails_against_external_latest_checkpoint(tmp_path
     )
 
 
+def test_modified_audit_row_fails_closed(tmp_path):
+    db_path, anchors_path, fingerprint = _anchored_store(tmp_path)
+    bundle = tmp_path / "bundle.tar.gz"
+    exported = export_audit_bundle(
+        db_path=db_path,
+        anchors_path=anchors_path,
+        out_path=bundle,
+        trusted_root_fingerprints=fingerprint,
+    )
+    genuine = verify_audit_bundle(
+        bundle,
+        trusted_root_fingerprints=fingerprint,
+        expected_latest_anchor_id=exported["latest_anchor_id"],
+    )
+    assert genuine["status"] == "PASS"
+
+    members = audit_bundle_module._read_archive(bundle)
+    manifest = audit_bundle_module._load_canonical_json(
+        members["manifest.json"], "manifest.json"
+    )
+    rows = audit_bundle_module._parse_jsonl(members["audit.jsonl"], "audit.jsonl")
+    records = audit_bundle_module._parse_jsonl(
+        members["anchors.jsonl"], "anchors.jsonl"
+    )
+    body = json.loads(rows[0]["body"])
+    body["detail"]["classification"] = "forged"
+    rows[0]["body"] = json.dumps(body, sort_keys=True, separators=(",", ":"))
+    modified = tmp_path / "modified-row.tar.gz"
+    _write_bundle(modified, manifest, rows, records)
+
+    receipt = verify_audit_bundle(
+        modified,
+        trusted_root_fingerprints=fingerprint,
+        expected_latest_anchor_id=exported["latest_anchor_id"],
+    )
+    assert receipt["ok"] is False
+    assert receipt["first_failure"] == "audit_rows_invalid"
+
+
+def test_wrong_external_root_reports_anchor_failure_family(tmp_path):
+    db_path, anchors_path, fingerprint = _anchored_store(tmp_path)
+    bundle = tmp_path / "bundle.tar.gz"
+    exported = export_audit_bundle(
+        db_path=db_path,
+        anchors_path=anchors_path,
+        out_path=bundle,
+        trusted_root_fingerprints=fingerprint,
+    )
+
+    receipt = verify_audit_bundle(
+        bundle,
+        trusted_root_fingerprints="sha256:" + ("0" * 64),
+        expected_latest_anchor_id=exported["latest_anchor_id"],
+    )
+    assert receipt["ok"] is False
+    assert receipt["first_failure"] == "anchor_set_invalid"
+
+
+def test_substituted_validly_signed_anchor_fails_closed(tmp_path):
+    db_path, anchors_path, fingerprint = _anchored_store(
+        tmp_path, actions=("first", "second")
+    )
+    bundle = tmp_path / "bundle.tar.gz"
+    exported = export_audit_bundle(
+        db_path=db_path,
+        anchors_path=anchors_path,
+        out_path=bundle,
+        trusted_root_fingerprints=fingerprint,
+    )
+    genuine = verify_audit_bundle(
+        bundle,
+        trusted_root_fingerprints=fingerprint,
+        expected_latest_anchor_id=exported["latest_anchor_id"],
+    )
+    assert genuine["status"] == "PASS"
+
+    members = audit_bundle_module._read_archive(bundle)
+    manifest = audit_bundle_module._load_canonical_json(
+        members["manifest.json"], "manifest.json"
+    )
+    rows = audit_bundle_module._parse_jsonl(members["audit.jsonl"], "audit.jsonl")
+    records = audit_bundle_module._parse_jsonl(
+        members["anchors.jsonl"], "anchors.jsonl"
+    )
+    assert len(records) == 2
+    records[1] = dict(records[0])
+    manifest["anchors"].update(
+        {
+            "sink_head_digest": "sha256:"
+            + hashlib.sha256(
+                audit_bundle_module._canonical_bytes(records[-1])
+            ).hexdigest(),
+            "latest_anchor_id": records[-1]["anchor_id"],
+            "latest_anchor_seq": records[-1]["seq"],
+        }
+    )
+    substituted = tmp_path / "substituted-anchor.tar.gz"
+    _write_bundle(substituted, manifest, rows, records)
+
+    receipt = verify_audit_bundle(
+        substituted,
+        trusted_root_fingerprints=fingerprint,
+        expected_latest_anchor_id=exported["latest_anchor_id"],
+    )
+    assert receipt["ok"] is False
+    assert receipt["first_failure"] == "anchor_set_invalid"
+
+
+def test_reordered_audit_rows_fail_closed(tmp_path):
+    db_path, anchors_path, fingerprint = _anchored_store(
+        tmp_path, actions=("first", "second")
+    )
+    bundle = tmp_path / "bundle.tar.gz"
+    exported = export_audit_bundle(
+        db_path=db_path,
+        anchors_path=anchors_path,
+        out_path=bundle,
+        trusted_root_fingerprints=fingerprint,
+    )
+    genuine = verify_audit_bundle(
+        bundle,
+        trusted_root_fingerprints=fingerprint,
+        expected_latest_anchor_id=exported["latest_anchor_id"],
+    )
+    assert genuine["status"] == "PASS"
+
+    members = audit_bundle_module._read_archive(bundle)
+    manifest = audit_bundle_module._load_canonical_json(
+        members["manifest.json"], "manifest.json"
+    )
+    rows = audit_bundle_module._parse_jsonl(members["audit.jsonl"], "audit.jsonl")
+    records = audit_bundle_module._parse_jsonl(
+        members["anchors.jsonl"], "anchors.jsonl"
+    )
+    rows.reverse()
+    reordered = tmp_path / "reordered-rows.tar.gz"
+    _write_bundle(reordered, manifest, rows, records)
+
+    receipt = verify_audit_bundle(
+        reordered,
+        trusted_root_fingerprints=fingerprint,
+        expected_latest_anchor_id=exported["latest_anchor_id"],
+    )
+    assert receipt["ok"] is False
+    assert receipt["first_failure"] == "audit_rows_invalid"
+
+
 def test_tampered_bundle_byte_fails_closed(tmp_path):
     # @positive-control(audit-bundle-verification)
     db_path, anchors_path, fingerprint = _anchored_store(tmp_path)
@@ -262,7 +517,11 @@ def test_tampered_bundle_byte_fails_closed(tmp_path):
     )
     assert receipt["status"] == "FAIL"
     assert receipt["ok"] is False
-    assert receipt["first_failure"] == "bundle_verification_failed"
+    assert receipt["first_failure"] in {
+        "audit_rows_invalid",
+        "anchor_set_invalid",
+        "bundle_structure_invalid",
+    }
 
 
 def test_exported_bundle_spanning_crypto_shred_erasure_verifies_offline(tmp_path):
