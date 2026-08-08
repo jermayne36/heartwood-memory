@@ -83,7 +83,10 @@ class AuditLog:
 
     def verify_chain(self) -> bool:
         prev = "genesis"
-        chain_id = self.store.chain_id() if hasattr(self.store, "chain_id") else None
+        try:
+            chain_id = self.store.chain_id() if hasattr(self.store, "chain_id") else None
+        except Exception:
+            chain_id = None
         for row in self.store.iter_audit():
             if "prev_hash" in row and row["prev_hash"] != prev:
                 return False

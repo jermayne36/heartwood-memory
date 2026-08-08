@@ -28,6 +28,10 @@ verification. No wildcard legacy exception exists, and no database row is
 changed. Audit bundles use the same verifier, so offline verification has the
 same epoch semantics as `verify_audit()`.
 
+Rows from external store implementations that omit all four display columns,
+or store them as null while omitting them from the body, fail verification.
+Heartwood's own append path always writes all four columns and body fields.
+
 This compatibility commitment preserves the claim the historical format can
 actually support: the original bytes remain intact and the previously unbound
 display projection is now pinned without pretending it was part of the old row
