@@ -369,6 +369,7 @@ def cmd_verify_audit_bundle(args: argparse.Namespace) -> dict:
     return verify_audit_bundle(
         args.bundle,
         trusted_root_fingerprints=roots,
+        expected_latest_anchor_id=args.expected_latest_anchor_id,
     )
 
 
@@ -833,7 +834,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="append",
         help=(
             "Separately pinned sha256 fingerprint; repeat for historical roots. "
-            "If omitted, reports bundle_manifest trust."
+            "Required for PASS."
+        ),
+    )
+    verify_bundle.add_argument(
+        "--expected-latest-anchor-id",
+        help=(
+            "Latest anchor ID obtained through a separate trusted channel; "
+            "required for PASS and rollback detection."
         ),
     )
     verify_bundle.add_argument("--output", type=Path)

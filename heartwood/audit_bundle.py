@@ -204,6 +204,8 @@ def export_audit_bundle(
         "chain_range": f"{rows[0]['seq']}-{rows[-1]['seq']}",
         "row_count": len(rows),
         "anchor_fingerprints": roots,
+        "latest_anchor_id": latest_anchor["anchor_id"],
+        "latest_anchor_seq": int(latest_anchor["seq"]),
         "excluded_unanchored_rows": manifest["chain"]["excluded_unanchored_rows"],
         "source_mutated": False,
     }
@@ -213,8 +215,9 @@ def verify_audit_bundle(
     bundle_path: str | Path,
     *,
     trusted_root_fingerprints: str | Iterable[str] | None = None,
+    expected_latest_anchor_id: str | None = None,
 ) -> dict[str, Any]:
-    """Verify a bundle entirely from local bytes and return a PASS/FAIL receipt."""
+    """Verify a bundle from local bytes against external trust and freshness pins."""
     try:
         members = _read_archive(Path(bundle_path))
         manifest = _load_canonical_json(members["manifest.json"], "manifest.json")
@@ -235,10 +238,9 @@ def verify_audit_bundle(
         if not isinstance(chain, dict) or not isinstance(anchors, dict) or not rows:
             raise AuditBundleError("manifest chain or anchor metadata is invalid")
         _validate_manifest_range(chain, rows)
-        roots = _root_list(
-            trusted_root_fingerprints
-            if trusted_root_fingerprints is not None
-            else anchors.get("trusted_root_fingerprints", ())
+        external_roots = _root_list(trusted_root_fingerprints or ())
+        roots = external_roots or _root_list(
+            anchors.get("trusted_root_fingerprints", ())
         )
         if not roots:
             raise AuditBundleError("no trusted anchor root fingerprint was supplied")
@@ -265,6 +267,48 @@ def verify_audit_bundle(
                 if record.get("record_type") == "audit_anchor"
             }
         )
+        latest_anchor_id = receipt["last_success_anchor_id"]
+        if not external_roots:
+            # @fail-closed(audit-bundle-external-trust)
+            return {
+                "status": "UNTRUSTED_SELF_CONSISTENT",
+                "ok": False,
+                "chain_id": chain["chain_id"],
+                "chain_range": f"{chain['first_seq']}-{chain['last_seq']}",
+                "row_count": chain["row_count"],
+                "anchors_checked": receipt["anchors_checked"],
+                "anchor_fingerprints": checked,
+                "trust_source": "bundle_manifest",
+                "latest_anchor_id": latest_anchor_id,
+                "first_failure": "external_trust_root_required",
+            }
+        if expected_latest_anchor_id is None:
+            # @fail-closed(audit-bundle-checkpoint)
+            return {
+                "status": "FRESHNESS_UNVERIFIED",
+                "ok": False,
+                "chain_id": chain["chain_id"],
+                "chain_range": f"{chain['first_seq']}-{chain['last_seq']}",
+                "row_count": chain["row_count"],
+                "anchors_checked": receipt["anchors_checked"],
+                "anchor_fingerprints": checked,
+                "trust_source": "external",
+                "latest_anchor_id": latest_anchor_id,
+                "first_failure": "external_latest_anchor_checkpoint_required",
+            }
+        if latest_anchor_id != expected_latest_anchor_id:
+            return {
+                "status": "FAIL",
+                "ok": False,
+                "chain_id": chain["chain_id"],
+                "chain_range": f"{chain['first_seq']}-{chain['last_seq']}",
+                "row_count": chain["row_count"],
+                "anchors_checked": receipt["anchors_checked"],
+                "anchor_fingerprints": checked,
+                "trust_source": "external",
+                "latest_anchor_id": latest_anchor_id,
+                "first_failure": "expected_latest_anchor_checkpoint_mismatch",
+            }
         return {
             "status": "PASS",
             "ok": True,
@@ -273,10 +317,9 @@ def verify_audit_bundle(
             "row_count": chain["row_count"],
             "anchors_checked": receipt["anchors_checked"],
             "anchor_fingerprints": checked,
-            "trust_source": (
-                "external" if trusted_root_fingerprints is not None else "bundle_manifest"
-            ),
-            "latest_anchor_id": receipt["last_success_anchor_id"],
+            "trust_source": "external",
+            "latest_anchor_id": latest_anchor_id,
+            "freshness_source": "external_latest_anchor_checkpoint",
         }
     except Exception as exc:
         # @fail-closed(audit-bundle-verification)
