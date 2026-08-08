@@ -14,6 +14,8 @@ transition (`from`, `to`, `operation`, `source_ids_json`, and `task_id`). The
 body, timestamp, and predecessor were always hash-bound; the four display
 columns were not present in the body.
 
+These compatibility commitments are published deliberately under owner decision #159.
+
 The verifier handles that closed legacy epoch with explicit compatibility
 commitments in `heartwood/audit_epochs.py`. Each accepted row is pinned by:
 
