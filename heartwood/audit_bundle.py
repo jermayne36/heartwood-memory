@@ -256,10 +256,6 @@ def verify_audit_bundle(
             _BundleSink(str(anchors["sink_id"]), records),
             trusted_root_fingerprints=roots,
         )
-        if receipt.get("ok") is not True:
-            raise AuditBundleError(
-                str(receipt.get("first_failure") or "signed_chain_verification_failed")
-            )
         checked = sorted(
             {
                 str(record["verification_root_fingerprint"])
@@ -268,6 +264,34 @@ def verify_audit_bundle(
             }
         )
         latest_anchor_id = receipt["last_success_anchor_id"]
+        receipt_boundary = {
+            "rows_since_success": receipt["rows_since_success"],
+            "last_success_seq": receipt["last_success_seq"],
+        }
+        if (
+            receipt["rows_since_success"] != 0
+            and receipt["last_success_seq"] is not None
+            and receipt["chain_ok"] is True
+            and receipt["anchors_ok"] is True
+        ):
+            # @fail-closed(audit-bundle-unanchored-tail)
+            return {
+                "status": "FAIL",
+                "ok": False,
+                "chain_id": chain["chain_id"],
+                "chain_range": f"{chain['first_seq']}-{chain['last_seq']}",
+                "row_count": chain["row_count"],
+                "anchors_checked": receipt["anchors_checked"],
+                "anchor_fingerprints": checked,
+                "trust_source": "external" if external_roots else "bundle_manifest",
+                "latest_anchor_id": latest_anchor_id,
+                **receipt_boundary,
+                "first_failure": "unsigned_rows_after_latest_anchor",
+            }
+        if receipt.get("ok") is not True:
+            raise AuditBundleError(
+                str(receipt.get("first_failure") or "signed_chain_verification_failed")
+            )
         if not external_roots:
             # @fail-closed(audit-bundle-external-trust)
             return {
@@ -280,6 +304,7 @@ def verify_audit_bundle(
                 "anchor_fingerprints": checked,
                 "trust_source": "bundle_manifest",
                 "latest_anchor_id": latest_anchor_id,
+                **receipt_boundary,
                 "first_failure": "external_trust_root_required",
             }
         if expected_latest_anchor_id is None:
@@ -294,9 +319,11 @@ def verify_audit_bundle(
                 "anchor_fingerprints": checked,
                 "trust_source": "external",
                 "latest_anchor_id": latest_anchor_id,
+                **receipt_boundary,
                 "first_failure": "external_latest_anchor_checkpoint_required",
             }
         if latest_anchor_id != expected_latest_anchor_id:
+            # @fail-closed(audit-bundle-checkpoint-mismatch)
             return {
                 "status": "FAIL",
                 "ok": False,
@@ -307,6 +334,7 @@ def verify_audit_bundle(
                 "anchor_fingerprints": checked,
                 "trust_source": "external",
                 "latest_anchor_id": latest_anchor_id,
+                **receipt_boundary,
                 "first_failure": "expected_latest_anchor_checkpoint_mismatch",
             }
         return {
@@ -319,6 +347,7 @@ def verify_audit_bundle(
             "anchor_fingerprints": checked,
             "trust_source": "external",
             "latest_anchor_id": latest_anchor_id,
+            **receipt_boundary,
             "freshness_source": "external_latest_anchor_checkpoint",
         }
     except Exception as exc:
@@ -326,9 +355,39 @@ def verify_audit_bundle(
         return {
             "status": "FAIL",
             "ok": False,
-            "first_failure": "bundle_verification_failed",
+            "first_failure": _sanitized_failure_reason(exc),
             "error_class": type(exc).__name__,
         }
+
+
+def _sanitized_failure_reason(exc: Exception) -> str:
+    """Return an auditor-useful reason family without exposing exception text."""
+    message = str(exc)
+    audit_row_failures = (
+        "audit_chain_invalid",
+        "anchored_row_missing:",
+        "anchored_row_hash_mismatch:",
+        "current_head_precedes_anchor:",
+        "audit rows ",
+        "manifest chain range ",
+        "audit bundle does not start at genesis",
+        "audit.jsonl",
+    )
+    anchor_failures = (
+        "anchor_sink_",
+        "duplicate_anchor_id",
+        "duplicate_or_reordered_anchor_seq",
+        "no_anchors",
+        "anchors.jsonl",
+        "signed_chain_verification_failed",
+    )
+    if message.startswith(audit_row_failures):
+        return "audit_rows_invalid"
+    if message.startswith(anchor_failures):
+        return "anchor_set_invalid"
+    if message == "latest_anchor_stale":
+        return "unsigned_rows_after_latest_anchor"
+    return "bundle_structure_invalid"
 
 
 def _open_read_only(path: Path) -> sqlite3.Connection:

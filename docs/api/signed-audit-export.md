@@ -62,8 +62,10 @@ Verification fails closed for missing, duplicate, extra, non-regular, oversized,
 non-canonical, or checksum-mismatched members; discontinuous or altered audit
 rows; malformed, reordered, or forged anchors; a chain/anchor mismatch; a root
 outside the supplied trust set; or a latest anchor that differs from the
-externally supplied checkpoint. A genuine older signed prefix is detectable
-only when the auditor supplies the expected latest anchor ID out of band.
+externally supplied checkpoint. It also rejects any audit rows after the latest
+signed anchor, even when an attacker recomputes their hash chain and rewrites the
+unsigned manifest receipts. A genuine older signed prefix is detectable only
+when the auditor supplies the expected latest anchor ID out of band.
 
 ## Erasure and privacy semantics
 
