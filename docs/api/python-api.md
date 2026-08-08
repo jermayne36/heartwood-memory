@@ -39,6 +39,11 @@ Generated from the current package surface by `scripts/generate_api_docs.py`.
 | `verify_audit` | `verify_audit(self) -> 'bool'` |
 | `with_tenant` | `with_tenant(self, tenant: 'str')` |
 
+`verify_audit()` checks internal hash-chain consistency and schema-epoch display
+binding. See [Audit schema epochs](audit-schema-epochs.md). External signed
+anchors are required to detect a fully re-chained database or tail loss; see
+[Signed audit export](signed-audit-export.md).
+
 ### `Policy`
 
 Policy(visibility: 'str' = 'tenant', classification: 'str' = 'internal', pii: 'bool' = False, roles: 'tuple' = (), attrs: 'tuple' = (), retention: 'str' = 'decayable', role_groups: 'tuple' = ())

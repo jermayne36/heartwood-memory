@@ -4,6 +4,11 @@ All notable changes to `heartwood-memory` are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- Audit verification now recognizes one exact legacy classification schema
+  epoch without rewriting history, while retaining fail-closed body, display,
+  sequence, chain-identity, and row-hash commitments in live and bundle checks.
+
 ## [0.2.5] - 2026-07-23
 
 ### Added

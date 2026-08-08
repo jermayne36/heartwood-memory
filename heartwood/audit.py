@@ -11,6 +11,8 @@ from __future__ import annotations
 import hashlib
 import json
 
+from .audit_epochs import legacy_display_binding_matches
+
 
 class AuditLog:
     def __init__(self, store, *, after_append=None):
@@ -81,10 +83,15 @@ class AuditLog:
 
     def verify_chain(self) -> bool:
         prev = "genesis"
+        try:
+            chain_id = self.store.chain_id() if hasattr(self.store, "chain_id") else None
+        except Exception:
+            chain_id = None
         for row in self.store.iter_audit():
             if "prev_hash" in row and row["prev_hash"] != prev:
                 return False
-            if not self._display_columns_match_body(row):
+            if not self._display_columns_match_body(row, chain_id=chain_id):
+                # @fail-closed(audit-display-binding)
                 return False
             expect = hashlib.sha256((prev + row["body"] + repr(row["ts"])).encode()).hexdigest()
             if expect != row["row_hash"]:
@@ -93,7 +100,7 @@ class AuditLog:
         return True
 
     @staticmethod
-    def _display_columns_match_body(row: dict) -> bool:
+    def _display_columns_match_body(row: dict, *, chain_id: str | None = None) -> bool:
         displayed = ("tenant", "principal", "action", "target")
         present = [key in row for key in displayed]
         if not any(present):
@@ -106,4 +113,6 @@ class AuditLog:
             return False
         if not isinstance(payload, dict):
             return False
-        return all(payload.get(key) == row[key] for key in displayed)
+        if all(key in payload for key in displayed):
+            return all(payload.get(key) == row[key] for key in displayed)
+        return legacy_display_binding_matches(chain_id=chain_id, row=row, payload=payload)

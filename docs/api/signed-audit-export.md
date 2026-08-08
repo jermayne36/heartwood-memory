@@ -1,5 +1,8 @@
 # Signed audit export
 
+See [Audit schema epochs](audit-schema-epochs.md) for the version-aware
+display-binding rules shared by live and offline verification.
+
 Heartwood can hand an auditor a portable copy of the store-global audit chain
 that verifies without access to the source database, anchor service, or network.
 Only the installed `heartwood-memory` wheel and the bundle are required.
