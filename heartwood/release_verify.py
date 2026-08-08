@@ -23,10 +23,23 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def verify_release(manifest_path: Path, public_key_path: Path, artifacts: list[Path]) -> None:
+def public_key_fingerprint(public_key: bytes) -> str:
+    return "sha256:" + hashlib.sha256(public_key).hexdigest()
+
+
+def verify_release(
+    manifest_path: Path,
+    public_key_path: Path,
+    artifacts: list[Path],
+    *,
+    trusted_public_key_fingerprint: str,
+) -> None:
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     signature = _b64d(payload.pop("signature_b64"))
     published_key = _b64d(public_key_path.read_text(encoding="utf-8"))
+    actual_fingerprint = public_key_fingerprint(published_key)
+    if actual_fingerprint != trusted_public_key_fingerprint:
+        raise RuntimeError("published public key does not match the trusted fingerprint")
     embedded_key = _b64d(payload["signing"]["public_key_b64"])
     if published_key != embedded_key:
         raise RuntimeError("published public key does not match the signed manifest")
@@ -55,9 +68,19 @@ def main() -> None:
     )
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--public-key", required=True, type=Path)
+    parser.add_argument(
+        "--public-key-fingerprint",
+        required=True,
+        help="Externally pinned sha256:<64 lowercase hex> fingerprint.",
+    )
     parser.add_argument("--artifact", required=True, action="append", type=Path)
     args = parser.parse_args()
-    verify_release(args.manifest, args.public_key, args.artifact)
+    verify_release(
+        args.manifest,
+        args.public_key,
+        args.artifact,
+        trusted_public_key_fingerprint=args.public_key_fingerprint,
+    )
 
 
 if __name__ == "__main__":
