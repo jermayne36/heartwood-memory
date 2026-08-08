@@ -27,18 +27,26 @@ An auditor verifies offline with the published wheel:
 ```bash
 python -m pip install heartwood-memory
 heartwood verify-audit-bundle bundle.tar.gz \
-  --anchor-root-fingerprint sha256:...
+  --anchor-root-fingerprint sha256:... \
+  --expected-latest-anchor-id anc_...
 ```
 
-The JSON receipt prints `status: PASS` or `status: FAIL`, the verified chain
+The JSON receipt prints `status: PASS` or a non-PASS state, the verified chain
 range, number of anchors checked, and every anchor-root fingerprint observed.
 A failure exits with status 2.
 
-For independent signer authentication, exchange the root fingerprint through a
-separate trusted channel and pass it explicitly as shown. If it is omitted, the
-verifier can still check bundle self-consistency using the fingerprint recorded
-in the manifest, but reports `trust_source: bundle_manifest`; that mode does not
-protect against wholesale replacement of both the bundle and its claimed root.
+For independent signer authentication and rollback detection, exchange both the
+root fingerprint and expected latest anchor ID through a separate trusted
+channel and pass them explicitly as shown. The export receipt prints the latest
+anchor ID for that exchange. Reading either value from the bundle itself does
+not establish trust or freshness.
+
+`PASS` requires both external values. If the root is omitted, the verifier can
+still check internal bundle consistency using the manifest's claimed root, but
+returns `UNTRUSTED_SELF_CONSISTENT` with `ok: false`. If the external root is
+present but the expected latest anchor ID is omitted, it returns
+`FRESHNESS_UNVERIFIED` with `ok: false`. Both states exit with status 2 and must
+not be treated as auditor verification.
 
 ## Bundle contract (`heartwood.audit-bundle.v1`)
 
@@ -52,8 +60,10 @@ The gzip-compressed tar contains exactly three canonical files:
 
 Verification fails closed for missing, duplicate, extra, non-regular, oversized,
 non-canonical, or checksum-mismatched members; discontinuous or altered audit
-rows; malformed, reordered, forged, or rolled-back anchors; a chain/anchor
-mismatch; or a root outside the supplied trust set.
+rows; malformed, reordered, or forged anchors; a chain/anchor mismatch; a root
+outside the supplied trust set; or a latest anchor that differs from the
+externally supplied checkpoint. A genuine older signed prefix is detectable
+only when the auditor supplies the expected latest anchor ID out of band.
 
 ## Erasure and privacy semantics
 
