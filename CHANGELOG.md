@@ -4,7 +4,14 @@ All notable changes to `heartwood-memory` are documented here.
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-08-10
+
 ### Fixed
+- Self-referential source spans now persist `text_ref: self` instead of a second
+  plaintext copy, while faithfulness and egress resolve the source text through
+  the tenant-scoped owning memory when it is still available.
+- SQLite stores enable `secure_delete`, and the release includes the guarded,
+  transactional plaintext-span remediation command for existing databases.
 - Audit verification now recognizes one exact legacy classification schema
   epoch without rewriting history, while retaining fail-closed body, display,
   sequence, chain-identity, and row-hash commitments in live and bundle checks.

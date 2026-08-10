@@ -14,6 +14,6 @@ the ``docs/api/continuity.md`` claim anchors.
 """
 
 BENCHMARK_VERSION = "1.0.0"
-TARGET_HEARTWOOD_VERSION = "0.2.5"
+TARGET_HEARTWOOD_VERSION = "0.2.6"
 
 __all__ = ["BENCHMARK_VERSION", "TARGET_HEARTWOOD_VERSION"]
