@@ -45,6 +45,7 @@ from .review import (
     normalize_review_state,
     validate_transition,
 )
+from .source_spans import normalize_self_spans
 from .store import Store
 from .strict import (
     StrictConfigurationError,
@@ -393,6 +394,7 @@ class Heartwood:
         sig_valid = self.signer.verify(sig, created_by, mem_id, ch, source.get("uri"),
                                        created_by, epistemic)
 
+        source_spans = normalize_self_spans(source_spans, content_hash=ch)
         mem = Memory(id=mem_id, tenant=self.tenant, kind=kind, epistemic=epistemic,
                      content=content, content_hash=ch, subject=subject, confidence=confidence,
                      salience=salience, created_by=created_by, created_at=created_at_value,
@@ -449,7 +451,7 @@ class Heartwood:
         This is the product API behind the Phase 0 egress gates. Call it before
         source spans are sent to external model providers.
         """
-        decision = evaluate_egress_request(request, provider_registry)
+        decision = evaluate_egress_request(request, provider_registry, client=self)
         self.audit.append(
             self.tenant,
             request.get("actor", "agent:egress"),
@@ -471,6 +473,7 @@ class Heartwood:
             candidate,
             support_threshold=support_threshold,
             review_threshold=review_threshold,
+            client=self,
         )
         self.audit.append(
             self.tenant,

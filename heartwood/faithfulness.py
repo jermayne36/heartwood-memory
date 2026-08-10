@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .source_spans import resolve_source_span_text
+
 TOKEN_RE = re.compile(r"[a-z0-9]+")
 ENTITY_RE = re.compile(r"\b(?:customer|case|order)\s*[_-]?\s*[a-z0-9]+\b")
 PERCENT_RE = re.compile(r"\b\d+(?:\.\d+)?\s*(?:percent|%)\b")
@@ -218,8 +220,13 @@ def evaluate_candidate(
     candidate: dict[str, Any],
     support_threshold: float = 0.72,
     review_threshold: float = 0.45,
+    *,
+    client=None,
 ) -> dict[str, Any]:
-    spans = {span["span_id"]: span["text"] for span in candidate.get("source_spans", [])}
+    spans = {
+        span["span_id"]: resolve_source_span_text(span, client) or ""
+        for span in candidate.get("source_spans", [])
+    }
     evaluated_claims = [
         evaluate_claim(claim, spans, support_threshold, review_threshold)
         for claim in candidate.get("claims", [])

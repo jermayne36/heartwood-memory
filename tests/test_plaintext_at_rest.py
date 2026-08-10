@@ -11,6 +11,7 @@ import numpy as np
 
 from heartwood import Heartwood
 from heartwood.envelope import hash_content
+from heartwood.source_spans import resolve_source_span_text
 
 TENANT = "tenant:plaintext-at-rest-control"
 SUBJECT = "subject:plaintext-at-rest-control"
@@ -50,9 +51,15 @@ def _storage_hits(db_path: Path, sentinel: str) -> tuple[str, ...]:
 
 def _remember_with_controls(db: Heartwood, *, memory_id: str, source_spans=()) -> str:
     positive_text = ((POSITIVE_SENTINEL + "|") * 1024)
-    content = f"{positive_text}\n{ENCRYPTED_ONLY_SENTINEL}"
+    db.remember(
+        ENCRYPTED_ONLY_SENTINEL,
+        subject=f"{SUBJECT}:encrypted-only",
+        created_by="agent:test",
+        memory_id=f"{memory_id}_encrypted_only",
+        source={"kind": "test", "uri": "test://encrypted-only"},
+    )
     return db.remember(
-        content,
+        positive_text,
         subject=SUBJECT,
         created_by="agent:test",
         memory_id=memory_id,
@@ -183,3 +190,70 @@ def test_plaintext_is_absent_from_sqlite_at_rest_and_after_hard_forget():
     assert observations["rows_after_forget"] == 0
     # @fail-closed(hw-plaintext-at-rest)
     assert not failures, "; ".join(failures)
+
+
+def test_self_referenced_span_resolves_and_degrades_after_hard_forget():
+    with tempfile.TemporaryDirectory(prefix="heartwood-span-resolver-") as temp_dir:
+        db = _open_db(Path(temp_dir) / "resolver.db")
+        try:
+            content = "Refund policy allows expedited review for duplicate charges."
+            memory_id = db.remember(
+                content,
+                subject=SUBJECT,
+                created_by="agent:test",
+                memory_id="mem_span_resolver",
+                source_spans=(
+                    {
+                        "source_id": "test://resolver",
+                        "span_id": "test://resolver#body",
+                        "text": content,
+                        "content_hash": hash_content(content),
+                    },
+                ),
+            )
+            span = db.store.get_meta(memory_id)["source_spans"][0]
+            assert span["text_ref"] == "self"
+            assert "text" not in span
+            assert resolve_source_span_text(span, db) == content
+
+            candidate = {
+                "candidate_id": "resolver-candidate",
+                "source_spans": [span],
+                "claims": [
+                    {
+                        "claim_id": "resolver-claim",
+                        "text": content,
+                        "source_span_ids": [span["span_id"]],
+                    }
+                ],
+            }
+            assert db.assess_faithfulness(candidate)["decision"] == "accepted"
+
+            request = {
+                "request_id": "resolver-egress",
+                "model": {
+                    "runtime": "external",
+                    "provider": "openai",
+                    "region": "us",
+                    "retention": "zero",
+                    "training_opt_out": True,
+                },
+                "policy": {
+                    "allow_external_models": True,
+                    "allowed_providers": ["openai"],
+                    "allowed_regions": ["us"],
+                    "require_zero_retention": True,
+                    "deny_classifications": [],
+                    "deny_pii_labels": [],
+                    "human_review_classifications": [],
+                },
+                "source_spans": [span],
+            }
+            decision = db.evaluate_egress(request)
+            assert decision["payload"][0]["text"] == content
+
+            db.forget(SUBJECT, actor="agent:test", reason="resolver degradation")
+            assert resolve_source_span_text(span, db) is None
+            assert db.assess_faithfulness(candidate)["decision"] == "needs_human_review"
+        finally:
+            db.close()

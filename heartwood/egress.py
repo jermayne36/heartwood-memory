@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .source_spans import resolve_source_span_text
+
 EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 PHONE_RE = re.compile(r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b")
 SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
@@ -99,7 +101,12 @@ def request_classifications(request: dict[str, Any]) -> set[str]:
     }
 
 
-def build_payload(request: dict[str, Any], labels_to_redact: set[str]) -> list[dict[str, Any]]:
+def build_payload(
+    request: dict[str, Any],
+    labels_to_redact: set[str],
+    *,
+    client=None,
+) -> list[dict[str, Any]]:
     payload: list[dict[str, Any]] = []
     for span in request.get("source_spans", []):
         labels = set(span.get("pii_labels", []))
@@ -108,7 +115,10 @@ def build_payload(request: dict[str, Any], labels_to_redact: set[str]) -> list[d
                 "span_id": span["span_id"],
                 "classification": span.get("classification", "internal"),
                 "pii_labels": sorted(labels),
-                "text": redact_text(span.get("text", ""), labels & labels_to_redact),
+                "text": redact_text(
+                    resolve_source_span_text(span, client) or "",
+                    labels & labels_to_redact,
+                ),
             }
         )
     return payload
@@ -126,6 +136,8 @@ def raw_pii_in_payload(payload: list[dict[str, Any]]) -> dict[str, list[str]]:
 def evaluate_request(
     request: dict[str, Any],
     provider_registry: dict[str, Any] | None = None,
+    *,
+    client=None,
 ) -> dict[str, Any]:
     model = request["model"]
     policy = request["policy"]
@@ -201,7 +213,7 @@ def evaluate_request(
                 decision = EXTERNAL_REDACTED
                 labels_to_redact = pii_labels
                 reasons.append("source contains redactable PII; redaction required before egress")
-                payload = build_payload(request, labels_to_redact)
+                payload = build_payload(request, labels_to_redact, client=client)
             else:
                 decision = HUMAN_REVIEW
                 reasons.append("source contains PII that is not automatically redactable")
@@ -209,7 +221,7 @@ def evaluate_request(
         else:
             decision = EXTERNAL_ALLOWED
             reasons.append("external egress allowed by tenant and model policy")
-            payload = build_payload(request, labels_to_redact)
+            payload = build_payload(request, labels_to_redact, client=client)
 
     raw_pii_leaks = raw_pii_in_payload(payload)
     if decision == EXTERNAL_REDACTED and raw_pii_leaks:

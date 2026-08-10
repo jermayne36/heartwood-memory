@@ -342,7 +342,7 @@ def import_markdown_corpus(
                     source_span = {
                         "source_id": spec.source_uri,
                         "span_id": f"{spec.source_uri}#body",
-                        "text": spec.content,
+                        "text_ref": "self",
                         "content_hash": spec.content_hash,
                     }
                     mem_id = db.remember(

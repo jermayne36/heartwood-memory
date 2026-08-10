@@ -73,6 +73,7 @@ class Store:
         self.conn = sqlite3.connect(path, timeout=30.0)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA busy_timeout=30000")
+        self.conn.execute("PRAGMA secure_delete=ON")
         if path != ":memory:":
             for attempt in range(5):
                 try:
@@ -207,6 +208,12 @@ class Store:
         return int(self.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0])
 
     def _row_meta(self, r) -> dict:
+        source_spans = []
+        for raw_span in json.loads(r["source_spans_json"] or "[]"):
+            span = dict(raw_span)
+            if span.get("text_ref") == "self":
+                span["memory_id"] = r["id"]
+            source_spans.append(span)
         return {
             "id": r["id"], "tenant": r["tenant"], "kind": r["kind"], "epistemic": r["epistemic"],
             "subject": r["subject"], "created_by": r["created_by"], "created_at": r["created_at"],
@@ -219,7 +226,7 @@ class Store:
             "subject_ids": tuple(json.loads(r["subject_ids_json"] or "[]")) or (r["subject"],),
             "entities": tuple(json.loads(r["entities_json"] or "[]")),
             "source_ids": tuple(json.loads(r["source_ids_json"] or "[]")),
-            "source_spans": tuple(json.loads(r["source_spans_json"] or "[]")),
+            "source_spans": tuple(source_spans),
             "source": json.loads(r["source_json"] or "{}"), "model_version": r["model_version"],
             "visibility": r["visibility"], "classification": r["classification"],
             "pii": bool(r["pii"]), "roles": tuple(json.loads(r["roles_json"] or "[]")),
