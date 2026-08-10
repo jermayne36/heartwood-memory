@@ -279,6 +279,7 @@ def _source_spans(document: ContextualDocument, chunk: Chunk, *, window_chars: i
             "source_id": source_uri,
             "span_id": f"{source_uri}#window-{chunk.ordinal:04d}",
             "text": document.content[window_start:window_end],
+            "content_hash": hash_content(document.content[window_start:window_end]),
             "classification": document.policy.classification,
             "pii_labels": ["pii"] if document.policy.pii else [],
             "char_start": window_start,

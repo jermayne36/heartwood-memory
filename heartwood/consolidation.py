@@ -283,6 +283,12 @@ def _read_member_content(client, member: dict[str, Any]) -> str | None:
 
 
 def _source_spans(client, members: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
+    """Build ephemeral plaintext spans for generation and governance checks.
+
+    The persistence path is ``Heartwood.remember``: it removes these ``text``
+    values and encrypts them into ``source_spans_enc`` before the row reaches
+    ``Store.insert_memory``.
+    """
     spans = []
     for member in members:
         text = _read_member_content(client, member)
