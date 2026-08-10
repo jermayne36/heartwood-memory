@@ -1,3 +1,4 @@
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,18 @@ def test_package_and_runtime_versions_match():
         ROOT / "heartwood" / "__init__.py",
         ROOT / "server.json",
     ) == "0.2.5"
+
+
+def test_package_metadata_links_public_source():
+    with (ROOT / "pyproject.toml").open("rb") as handle:
+        project = tomllib.load(handle)["project"]
+
+    assert project["urls"] == {
+        "Homepage": "https://heartwoodmemory.com/",
+        "Repository": "https://github.com/jermayne36/heartwood-memory",
+        "Documentation": "https://github.com/jermayne36/heartwood-memory/tree/main/docs",
+        "Issues": "https://github.com/jermayne36/heartwood-memory/issues",
+    }
 
 
 def test_version_guard_rejects_runtime_drift(tmp_path):

@@ -39,6 +39,12 @@ dependencies = [
   "sqlite-vec>=0.1.6",
 ]
 
+[project.urls]
+Homepage = "https://heartwoodmemory.com/"
+Repository = "https://github.com/jermayne36/heartwood-memory"
+Documentation = "https://github.com/jermayne36/heartwood-memory/tree/main/docs"
+Issues = "https://github.com/jermayne36/heartwood-memory/issues"
+
 [project.optional-dependencies]
 crypto = [
   "cryptography>=42",

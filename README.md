@@ -56,6 +56,28 @@ Agent contract suite reports as skipped unless its separate integration
 dependency is installed. To install the same gate as a pre-commit hook without
 overwriting another hook, run `bash scripts/install-hooks.sh`.
 
+## Re-run the public trust suite
+
+The public trust-receipts benchmark lives in the source repository rather than
+the installed wheel. Starting from a clean clone, run:
+
+```bash
+git clone https://github.com/jermayne36/heartwood-memory.git
+cd heartwood-memory
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --quiet -e ".[dev]"
+python bench/run_benchmark.py --out .heartwood/trust-receipt.json
+```
+
+On Windows PowerShell, replace the activation line with
+`.\.venv\Scripts\Activate.ps1`.
+
+The command exits non-zero if an executable contract or positive-control case
+fails, or if the benchmark's existing claim-anchor scan finds a violation. Its
+one-line terminal summary reports the live case counts; the JSON file contains
+the per-probe results and the separately published boundary cases.
+
 ## 5-minute quickstart
 
 Remember a governed memory, recall it under policy, and emit a key-destruction
