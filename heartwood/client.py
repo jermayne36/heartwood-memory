@@ -45,7 +45,7 @@ from .review import (
     normalize_review_state,
     validate_transition,
 )
-from .source_spans import normalize_self_spans
+from .source_spans import normalize_self_spans, split_source_span_texts
 from .store import Store
 from .strict import (
     StrictConfigurationError,
@@ -395,6 +395,7 @@ class Heartwood:
                                        created_by, epistemic)
 
         source_spans = normalize_self_spans(source_spans, content_hash=ch)
+        source_spans, source_span_texts = split_source_span_texts(source_spans)
         mem = Memory(id=mem_id, tenant=self.tenant, kind=kind, epistemic=epistemic,
                      content=content, content_hash=ch, subject=subject, confidence=confidence,
                      salience=salience, created_by=created_by, created_at=created_at_value,
@@ -410,6 +411,14 @@ class Heartwood:
         key = self.keys.get_or_create(self.tenant, subject)
         content_enc = self.cipher.encrypt(content, key)
         index_text_enc = self.cipher.encrypt(index_text, key) if index_text is not None else None
+        source_spans_enc = (
+            self.cipher.encrypt(
+                json.dumps(source_span_texts, separators=(",", ":")),
+                key,
+            )
+            if source_span_texts
+            else None
+        )
 
         row = {
             "id": mem_id, "tenant": self.tenant, "kind": kind, "epistemic": epistemic,
@@ -423,6 +432,7 @@ class Heartwood:
             "model_version": model_version,
             "review_state": review_state,
             "index_text_enc": index_text_enc,
+            "source_spans_enc": source_spans_enc,
             "policy": {"visibility": policy.visibility, "classification": policy.classification,
                        "pii": policy.pii, "roles": policy.roles, "role_groups": policy.role_groups,
                        "attrs": policy.attrs, "retention": policy.retention},
@@ -1288,6 +1298,35 @@ class Heartwood:
             return self.cipher.decrypt(enc, key)
         except Exception:
             return None
+
+    def _read_source_span_text_unchecked(
+        self,
+        mem_id: str,
+        *,
+        text_index,
+        content_hash: str | None,
+    ) -> str | None:
+        """Decrypt one non-self source span for trusted governance adapters."""
+        if type(text_index) is not int or text_index < 0:
+            return None
+        enc, subject = self.store.get_source_spans_enc(mem_id)
+        if enc is None:
+            return None
+        key = self.keys.get(self.tenant, subject)
+        if key is None:
+            return None
+        try:
+            texts = json.loads(self.cipher.decrypt(enc, key))
+            text = texts[text_index]
+        except (IndexError, TypeError, ValueError):
+            return None
+        except Exception:
+            return None
+        if not isinstance(text, str):
+            return None
+        if content_hash and hash_content(text) != content_hash:
+            return None
+        return text
 
     def purge(self, mem_id: str, actor="system") -> bool:
         """Physically remove a single memory row + its derived artifacts (per-file

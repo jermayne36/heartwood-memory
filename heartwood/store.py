@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS memories (
   content_hash TEXT,
   truth_status TEXT, policy_scope TEXT, valid_from TEXT, valid_until TEXT,
   subject_ids_json TEXT, entities_json TEXT, source_ids_json TEXT, source_spans_json TEXT,
+  source_spans_enc BLOB,
   source_json TEXT, model_version TEXT,
   visibility TEXT, classification TEXT, pii INTEGER,
   roles_json TEXT, role_groups_json TEXT, attrs_json TEXT, retention TEXT,
@@ -104,6 +105,7 @@ class Store:
             "ALTER TABLE memories ADD COLUMN entities_json TEXT",
             "ALTER TABLE memories ADD COLUMN source_ids_json TEXT",
             "ALTER TABLE memories ADD COLUMN source_spans_json TEXT",
+            "ALTER TABLE memories ADD COLUMN source_spans_enc BLOB",
             "ALTER TABLE memories ADD COLUMN review_state TEXT",
             "ALTER TABLE memories ADD COLUMN index_text_enc BLOB",
         ):
@@ -131,16 +133,17 @@ class Store:
         self.conn.execute(
             """INSERT INTO memories (id,tenant,kind,epistemic,subject,confidence,salience,
                created_by,created_at,content_hash,truth_status,policy_scope,valid_from,valid_until,
-               subject_ids_json,entities_json,source_ids_json,source_spans_json,source_json,model_version,visibility,classification,pii,
+               subject_ids_json,entities_json,source_ids_json,source_spans_json,source_spans_enc,source_json,model_version,visibility,classification,pii,
                roles_json,role_groups_json,attrs_json,retention,producer_sig,sig_valid,
                review_state,index_text_enc,content_enc,emb,emb_dim,indexed)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (m["id"], m["tenant"], m["kind"], m["epistemic"], m["subject"], m["confidence"],
              m["salience"], m["created_by"], m["created_at"], m["content_hash"],
              m.get("truth_status"), m.get("policy_scope", "default"), m.get("valid_from"),
              m.get("valid_until"), json.dumps(list(m.get("subject_ids", (m["subject"],)))),
              json.dumps(list(m.get("entities", ()))),
              json.dumps(list(m.get("source_ids", ()))), json.dumps(list(m.get("source_spans", ()))),
+             m.get("source_spans_enc"),
              json.dumps(m["source"]),
              m["model_version"], m["policy"]["visibility"], m["policy"]["classification"],
              int(m["policy"]["pii"]), json.dumps(list(m["policy"]["roles"])),
@@ -211,7 +214,7 @@ class Store:
         source_spans = []
         for raw_span in json.loads(r["source_spans_json"] or "[]"):
             span = dict(raw_span)
-            if span.get("text_ref") == "self":
+            if span.get("text_ref") in {"self", "encrypted"}:
                 span["memory_id"] = r["id"]
             source_spans.append(span)
         return {
@@ -247,6 +250,13 @@ class Store:
         r = self.conn.execute("SELECT content_enc, subject FROM memories WHERE id=?",
                               (mem_id,)).fetchone()
         return (r["content_enc"], r["subject"]) if r else (None, None)
+
+    def get_source_spans_enc(self, mem_id: str):
+        r = self.conn.execute(
+            "SELECT source_spans_enc, subject FROM memories WHERE id=?",
+            (mem_id,),
+        ).fetchone()
+        return (r["source_spans_enc"], r["subject"]) if r else (None, None)
 
     def get_text_encs(self, mem_id: str):
         r = self.conn.execute(
