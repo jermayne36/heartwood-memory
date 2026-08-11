@@ -22,6 +22,14 @@ from cryptography.hazmat.primitives.keywrap import aes_key_unwrap, aes_key_wrap
 ENVELOPE_PREFIX = b"hwkw1:"
 
 
+def _validate_retention_floor_seconds(value: int | None) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("retention_floor_seconds must be a non-negative integer")
+    return value
+
+
 def _b64e(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 
@@ -58,7 +66,20 @@ def envelope_key_id(blob: bytes | None) -> str | None:
 
 
 class KeyCustodian:
+    """Custody contract with a declared provider-side retention floor.
+
+    The floor is echoed in erasure receipts as configuration, not measured as
+    an erasure-duration or purge-completion guarantee. ``None`` means that a
+    backend has not declared a floor; proof-oriented callers declare one.
+    """
+
     name = "raw-local"
+    retention_floor_seconds = 0
+
+    def __init__(self, *, retention_floor_seconds: int = 0):
+        self.retention_floor_seconds = _validate_retention_floor_seconds(
+            retention_floor_seconds
+        )
 
     def wrap(self, *, tenant: str, subject: str, dek: bytes) -> bytes:
         return dek
@@ -67,7 +88,11 @@ class KeyCustodian:
         return envelope
 
     def info(self, envelope: bytes | None = None) -> dict:
-        return {"mode": self.name, "wrapped": is_wrapped_key(envelope)}
+        return {
+            "mode": self.name,
+            "wrapped": is_wrapped_key(envelope),
+            "retention_floor_seconds": self.retention_floor_seconds,
+        }
 
 
 class RawKeyCustodian(KeyCustodian):
@@ -87,6 +112,10 @@ class LocalKmsCustodian(KeyCustodian):
 
     root_key: bytes
     key_id: str = "local-root"
+    retention_floor_seconds: int | None = None
+
+    def __post_init__(self) -> None:
+        _validate_retention_floor_seconds(self.retention_floor_seconds)
 
     @property
     def name(self) -> str:  # type: ignore[override]
@@ -112,7 +141,12 @@ class LocalKmsCustodian(KeyCustodian):
         return aes_key_unwrap(self._kek(tenant, subject), _b64d(data["wrapped_dek"]))
 
     def info(self, envelope: bytes | None = None) -> dict:
-        info = {"mode": self.name, "key_id": self.key_id, "wrapped": is_wrapped_key(envelope)}
+        info = {
+            "mode": self.name,
+            "key_id": self.key_id,
+            "wrapped": is_wrapped_key(envelope),
+            "retention_floor_seconds": self.retention_floor_seconds,
+        }
         if is_wrapped_key(envelope):
             data = json.loads(bytes(envelope)[len(ENVELOPE_PREFIX):].decode("utf-8"))
             info["algorithm"] = data.get("alg")

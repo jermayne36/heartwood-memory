@@ -1252,8 +1252,22 @@ class Heartwood:
 
     def forget(self, subject, *, mode="hard", actor="system", reason="", legal_basis=""):
         purged = 0
-        if mode == "hard":
+        hard = mode == "hard"
+        erasure_mechanism = {
+            "erasure_initiated_at": _utc_now_iso() if hard else None,
+            "key_shred_requested": hard,
+            "purge_requested": hard,
+            "custody_backend": self.keys.custodian.name,
+            "custody_retention_floor_seconds": self.keys.custodian.retention_floor_seconds,
+        }
+        if hard:
             self.keys.shred(self.tenant, subject)        # crypto-shred (key destruction)
+            envelope, key_state = self.store.get_key(self.tenant, subject)
+            # @fail-closed(erasure-mechanism-t0)
+            if envelope is not None or key_state not in (None, "shredded"):
+                raise RuntimeError(
+                    "hard erasure did not make the subject key unusable"
+                )
             seed = sorted(set(self.store.subject_ids(self.tenant, subject))
                           | set(self.store.lineage_memory_ids(self.tenant, subject)))
             cascade = self.store.descendants(seed)       # deletion-lineage: derived artifacts too
@@ -1269,10 +1283,12 @@ class Heartwood:
         self.audit.append(self.tenant, actor, "forget", subject,
                           {"mode": mode, "purged": purged,
                            "cascade": cascade_n if mode == "hard" else 0,
-                           "reason": reason, "legal_basis": legal_basis})
+                           "reason": reason, "legal_basis": legal_basis,
+                           **erasure_mechanism})
         return {"subject": subject, "mode": mode, "purged": purged,
                 "cascade": cascade_n if mode == "hard" else 0,
-                "key_shredded": mode == "hard", "reason": reason, "legal_basis": legal_basis}
+                "key_shredded": mode == "hard", "reason": reason,
+                "legal_basis": legal_basis, **erasure_mechanism}
 
     # -- trusted internals (same-process adapters: e.g. memory-tool backend) --- #
     def read_content(self, mem_id: str) -> str | None:
