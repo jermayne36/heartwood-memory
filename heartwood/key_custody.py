@@ -5,8 +5,9 @@ The production pattern is an envelope-encryption chain:
     deployment root secret -> HKDF tenant/subject KEK -> AES-KW wrapped DEK
 
 The local raw custodian remains available for older stores and tiny in-memory
-tests, but production deployments should pass ``LocalKmsCustodian`` with a root
-secret sourced from a real vault/KMS integration.
+tests. Production deployments can inject a provider adapter through the public
+custody and durable-signing protocols without exposing provider implementation
+code in the core.
 """
 from __future__ import annotations
 
@@ -14,8 +15,11 @@ import base64
 import json
 import os
 from dataclasses import dataclass
+from typing import Protocol, runtime_checkable
 
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.keywrap import aes_key_unwrap, aes_key_wrap
 
@@ -63,6 +67,44 @@ def envelope_key_id(blob: bytes | None) -> str | None:
         return None
     data = json.loads(bytes(blob)[len(ENVELOPE_PREFIX):].decode("utf-8"))
     return data.get("key_id")
+
+
+@runtime_checkable
+class Ed25519Signer(Protocol):
+    """Opaque Ed25519 signing handle returned by a custody backend."""
+
+    key_id: str
+
+    def public_key_bytes(self) -> bytes:
+        """Return the raw 32-byte Ed25519 verification key."""
+
+    def sign(self, payload: bytes) -> bytes:
+        """Sign bytes without exposing the custody backend's root material."""
+
+
+@runtime_checkable
+class SigningKeyCustodian(Protocol):
+    """Capability seam for custody backends that can provide durable signing."""
+
+    key_id: str
+
+    def ed25519_signer(self, *, salt: bytes, info: bytes) -> Ed25519Signer:
+        """Return a deterministic domain-scoped Ed25519 signing handle."""
+
+
+@dataclass(frozen=True)
+class _LocalEd25519Signer:
+    key_id: str
+    private_key: ed25519.Ed25519PrivateKey
+
+    def public_key_bytes(self) -> bytes:
+        return self.private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+
+    def sign(self, payload: bytes) -> bytes:
+        return self.private_key.sign(payload)
 
 
 class KeyCustodian:
@@ -152,6 +194,22 @@ class LocalKmsCustodian(KeyCustodian):
             info["algorithm"] = data.get("alg")
             info["envelope_key_id"] = data.get("key_id")
         return info
+
+    def ed25519_signer(self, *, salt: bytes, info: bytes) -> Ed25519Signer:
+        if not isinstance(salt, bytes) or not salt:
+            raise ValueError("Ed25519 derivation salt must be non-empty bytes")
+        if not isinstance(info, bytes) or not info:
+            raise ValueError("Ed25519 derivation info must be non-empty bytes")
+        seed = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            info=info,
+        ).derive(self.root_key)
+        return _LocalEd25519Signer(
+            key_id=self.key_id,
+            private_key=ed25519.Ed25519PrivateKey.from_private_bytes(seed),
+        )
 
     def _kek(self, tenant: str, subject: str) -> bytes:
         return HKDF(

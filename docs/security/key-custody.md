@@ -34,10 +34,18 @@ only public principal keys.
 |---|---|---|
 | `raw-local` | `RawKeyCustodian` | Backward-compatible local mode for existing stores and small tests |
 | `hkdf-aeskw-local` | `LocalKmsCustodian` | Phase 1 KMS-compatible pattern using a vault-provided root secret |
+| implementation-defined | `KeyCustodian` + `SigningKeyCustodian` protocols | External wrapping and durable Ed25519 signing through an injected provider adapter |
 
 Production should pass a custodian whose root secret comes from KMS/HSM/vault
 storage. The local class exists to verify the envelope pattern without adding a
 managed dependency.
+
+The public extension seam is capability-based. An external implementation
+supplies `wrap(...)`, `unwrap(...)`, `info(...)`, a stable `key_id`, and
+`ed25519_signer(...)`. Strict mode, audit anchors, manifest sealing, and
+provenance dispatch through that protocol rather than requiring the local
+implementation class. Provider clients, credentials, key provisioning, and
+managed-service configuration are intentionally outside the public core.
 
 ## Environment Configuration
 
@@ -121,6 +129,8 @@ python tests/test_key_custody.py
 The test proves that:
 
 - the persisted key blob is an HKDF/AES-KW envelope;
+- LocalKmsCustodian signing output remains byte-compatible through the public protocol;
+- a non-local protocol implementation can drive provenance, strict manifests, and anchors;
 - content survives restart when the same root secret is supplied;
 - a different root secret fails closed;
 - recall still verifies provenance over encrypted content.

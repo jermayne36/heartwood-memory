@@ -90,6 +90,7 @@ Fields:
 
 | Method | Signature |
 | --- | --- |
+| `ed25519_signer` | `ed25519_signer(self, *, salt: 'bytes', info: 'bytes') -> 'Ed25519Signer'` |
 | `info` | `info(self, envelope: 'bytes | None' = None) -> 'dict'` |
 | `unwrap` | `unwrap(self, *, tenant: 'str', subject: 'str', envelope: 'bytes') -> 'bytes'` |
 | `wrap` | `wrap(self, *, tenant: 'str', subject: 'str', dek: 'bytes') -> 'bytes'` |

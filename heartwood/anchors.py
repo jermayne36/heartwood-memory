@@ -22,12 +22,10 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol, runtime_checkable
 
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from .audit import AuditLog
-from .key_custody import LocalKmsCustodian
+from .key_custody import SigningKeyCustodian
 
 _ANCHOR_DOMAIN = "heartwood.audit-anchor.v1"
 _MANIFEST_PIN_DOMAIN = "heartwood.strict-cutover-pin.v1"
@@ -181,7 +179,7 @@ class AnchorWriter:
         *,
         store,
         sink: AnchorSink,
-        custodian: LocalKmsCustodian,
+        custodian: SigningKeyCustodian,
         trusted_root_fingerprints: str | Iterable[str],
         interval_s: float | None = None,
         every_n_rows: int | None = None,
@@ -190,7 +188,9 @@ class AnchorWriter:
         retry_backoff_max_s: float = 60.0,
         background_time_cadence: bool = False,
     ):
-        if not isinstance(custodian, LocalKmsCustodian):
+        # @fail-closed(custodian-signing-capability): anchoring must refuse a
+        # backend that cannot supply the durable signing capability.
+        if not isinstance(custodian, SigningKeyCustodian):
             raise AnchorConfigurationError(
                 "audit anchoring requires durable Ed25519 custody"
             )
@@ -229,10 +229,7 @@ class AnchorWriter:
             chain_id=self.chain_id,
             sink_id=self.sink.sink_id,
         )
-        self._public_key = self._private_key.public_key().public_bytes(
-            encoding=serialization.Encoding.Raw,
-            format=serialization.PublicFormat.Raw,
-        )
+        self._public_key = self._private_key.public_key_bytes()
         self.root_fingerprint = _fingerprint(self._public_key)
         if self.root_fingerprint not in self.trusted_root_fingerprints:
             raise AnchorConfigurationError(
@@ -715,13 +712,15 @@ class AnchorWriter:
 
 
 def anchor_root_fingerprint(
-    custodian: LocalKmsCustodian,
+    custodian: SigningKeyCustodian,
     *,
     chain_id: str,
     sink_id: str,
 ) -> str:
     """Derive the non-secret verification-root fingerprint to pin externally."""
-    if not isinstance(custodian, LocalKmsCustodian):
+    # @fail-closed(custodian-signing-capability): an external pin must never be
+    # derived from a backend without the durable signing capability.
+    if not isinstance(custodian, SigningKeyCustodian):
         raise AnchorConfigurationError(
             "audit anchoring requires durable Ed25519 custody"
         )
@@ -729,10 +728,7 @@ def anchor_root_fingerprint(
         custodian,
         chain_id=chain_id,
         sink_id=sink_id,
-    ).public_key().public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw,
-    )
+    ).public_key_bytes()
     return _fingerprint(public_key)
 
 
@@ -1042,22 +1038,19 @@ def _latest_anchor(records: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 
 def _anchor_private_key(
-    custodian: LocalKmsCustodian,
+    custodian: SigningKeyCustodian,
     *,
     chain_id: str,
     sink_id: str,
 ):
     if not _CHAIN_ID_RE.fullmatch(str(chain_id)):
         raise AnchorConfigurationError("store chain_id is invalid")
-    seed = HKDF(
-        algorithm=hashes.SHA256(),
-        length=32,
+    return custodian.ed25519_signer(
         salt=b"heartwood:audit-anchor:v1",
         info=(
             f"chain:{chain_id}:sink:{sink_id}:key:{custodian.key_id}"
         ).encode("utf-8"),
-    ).derive(custodian.root_key)
-    return ed25519.Ed25519PrivateKey.from_private_bytes(seed)
+    )
 
 
 def _normalize_fingerprints(value: str | Iterable[str]) -> set[str]:

@@ -25,7 +25,13 @@ from .anchors import (
 from .egress import DENIED, EXTERNAL_ALLOWED, EXTERNAL_REDACTED, HUMAN_REVIEW, LOCAL_ONLY
 from .envelope import Epistemic, Kind, Memory, Policy, TruthStatus
 from .ergonomics import normalize_tenant, policy_from, principal_from, tenant_slug
-from .key_custody import LocalKmsCustodian, RawKeyCustodian
+from .key_custody import (
+    Ed25519Signer,
+    KeyCustodian,
+    LocalKmsCustodian,
+    RawKeyCustodian,
+    SigningKeyCustodian,
+)
 from .key_lifecycle import (
     CryptoEraseProof,
     ProvenanceAliasReport,
@@ -67,6 +73,9 @@ __all__ = [
     "principal_from",
     "LocalKmsCustodian",
     "RawKeyCustodian",
+    "KeyCustodian",
+    "SigningKeyCustodian",
+    "Ed25519Signer",
     "TenantRootMaterial",
     "RewrapReport",
     "ProvenanceAliasReport",

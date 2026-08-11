@@ -23,13 +23,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from .audit import AuditLog
 from .envelope import hash_content
-from .key_custody import LocalKmsCustodian, is_wrapped_key
+from .key_custody import SigningKeyCustodian, is_wrapped_key
 from .provenance import Signer, verify_meta
 
 _REPORT_DOMAIN = "heartwood.strict-preflight-report.v1"
@@ -108,7 +106,9 @@ def resolve_legacy_exemption(value: str | None) -> str:
 def require_durable_strict_custody(mode: StrictMode, custodian: Any) -> None:
     if mode is StrictMode.OFF:
         return
-    if not isinstance(custodian, LocalKmsCustodian):
+    # @fail-closed(custodian-signing-capability): strict modes cannot start
+    # without a backend that supplies the durable signing capability.
+    if not isinstance(custodian, SigningKeyCustodian):
         raise StrictConfigurationError(
             "strict signature mode requires durable Ed25519 identity custody; "
             "set HEARTWOOD_KEY_CUSTODY_ROOT_B64 and HEARTWOOD_KEY_CUSTODY_KEY_ID "
@@ -680,20 +680,19 @@ class StrictCutoverManager:
 
 def sign_strict_cutover_manifest(
     unsigned_manifest: dict[str, Any],
-    custodian: LocalKmsCustodian,
+    custodian: SigningKeyCustodian,
 ) -> dict[str, Any]:
     """Dedicated Ed25519 signature over the canonical strict-manifest body."""
-    if not isinstance(custodian, LocalKmsCustodian):
+    # @fail-closed(custodian-signing-capability): sealing must refuse a backend
+    # that cannot supply the durable signing capability.
+    if not isinstance(custodian, SigningKeyCustodian):
         raise StrictConfigurationError(
             "strict cutover manifests require durable Ed25519 custody"
         )
     chain_id = str(unsigned_manifest.get("chain_id") or "")
     producer = str(unsigned_manifest.get("producer") or "")
     private_key = _strict_manifest_private_key(custodian, chain_id, producer)
-    public_key = private_key.public_key().public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw,
-    )
+    public_key = private_key.public_key_bytes()
     body = {
         **unsigned_manifest,
         "signing": {
@@ -976,19 +975,16 @@ def _audit_detail(row: dict) -> dict:
 
 
 def _strict_manifest_private_key(
-    custodian: LocalKmsCustodian,
+    custodian: SigningKeyCustodian,
     chain_id: str,
     producer: str,
 ):
-    seed = HKDF(
-        algorithm=hashes.SHA256(),
-        length=32,
+    return custodian.ed25519_signer(
         salt=b"heartwood:strict-cutover-manifest:v1",
         info=(
             f"chain:{chain_id}:producer:{producer}:key:{custodian.key_id}"
         ).encode("utf-8"),
-    ).derive(custodian.root_key)
-    return ed25519.Ed25519PrivateKey.from_private_bytes(seed)
+    )
 
 
 def _public_report(report: dict[str, Any]) -> dict[str, Any]:

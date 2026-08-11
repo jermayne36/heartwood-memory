@@ -20,8 +20,6 @@ import os
 from typing import Any
 
 try:
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ed25519
 
@@ -29,7 +27,7 @@ try:
 except Exception:
     _HAVE_ED25519 = False
 
-from .key_custody import LocalKmsCustodian
+from .key_custody import Ed25519Signer, SigningKeyCustodian
 
 
 def _b64e(data: bytes) -> str:
@@ -85,17 +83,19 @@ class Signer:
         return [registered] if registered is not None else []
 
     def _custody_private_key(self, principal_id: str):
-        if not (_HAVE_ED25519 and isinstance(self.key_custodian, LocalKmsCustodian)):
+        if not (
+            _HAVE_ED25519
+            and isinstance(self.key_custodian, SigningKeyCustodian)
+        ):
             return None
-        seed = HKDF(
-            algorithm=hashes.SHA256(),
-            length=32,
+        return self.key_custodian.ed25519_signer(
             salt=f"heartwood:signing:{self.tenant}".encode("utf-8"),
             info=f"principal:{principal_id}:ed25519:{self.key_custodian.key_id}".encode("utf-8"),
-        ).derive(self.key_custodian.root_key)
-        return ed25519.Ed25519PrivateKey.from_private_bytes(seed)
+        )
 
     def _public_bytes(self, private_key) -> bytes:
+        if isinstance(private_key, Ed25519Signer):
+            return private_key.public_key_bytes()
         return private_key.public_key().public_bytes(
             encoding=serialization.Encoding.Raw,
             format=serialization.PublicFormat.Raw,
