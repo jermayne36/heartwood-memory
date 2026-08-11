@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import faulthandler
 import gc
 import hashlib
 import hmac
@@ -21,6 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from socketserver import ThreadingMixIn
 from typing import Any
 from urllib import error, request
 
@@ -64,6 +66,20 @@ _MALLOC_PRESSURE_RELIEF_FN = None
 _MALLOC_PRESSURE_RELIEF_LOOKED_UP = False
 _MALLOC_TRIM_FN = None
 _MALLOC_TRIM_LOOKED_UP = False
+
+# R1: connection-level hardening
+_DEFAULT_CONNECTION_TIMEOUT_S = 30.0
+_DEFAULT_MAX_REQUEST_BODY_BYTES = 256 * 1024  # 256 KB
+_DEFAULT_MAX_CONCURRENT_HANDLERS = 4
+
+# R2: listener-progress watchdog
+_DEFAULT_LISTENER_PROBE_INTERVAL_S = 30.0
+_DEFAULT_LISTENER_FAIL_THRESHOLD = 3
+_DEFAULT_LISTENER_FAIL_WINDOW_S = 90.0
+
+# R3: request lifecycle counter (monotonic; not used for security)
+_REQUEST_LIFECYCLE_COUNTER = 0
+_REQUEST_LIFECYCLE_LOCK = threading.Lock()
 
 
 class _TaskVMInfo(ctypes.Structure):
@@ -129,6 +145,10 @@ class RecallReadinessError(RuntimeError):
             "db_embedding_dimensions": readiness.get("db_embedding_dimensions"),
         }
         super().__init__(json.dumps(message, sort_keys=True, separators=(",", ":")))
+
+
+class RequestBodyTooLargeError(ValueError):
+    """Content-Length exceeds the configured body size cap (R1 hardening)."""
 
 
 def principal_from_payload(payload: dict[str, Any], *, default_tenant: str) -> Principal:
@@ -908,8 +928,66 @@ class RecallEngine:
             self.clients.clear()
 
 
-class RecallHTTPServer(HTTPServer):
+class BoundedThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    """Bounded threading HTTP server for the recall gateway (R1 hardening).
+
+    Accepts each new connection on the listener thread independently of worker
+    threads, so a stalled handler cannot block the accept loop and starve
+    subsequent clients (including Fly's TCP health check).
+
+    The worker-thread count is bounded by a semaphore.  Connections that arrive
+    when all slots are occupied are closed immediately at the TCP layer rather
+    than queuing indefinitely—this makes the backlog-full condition visible as a
+    connection reset rather than an invisible hang.
+    """
+
+    daemon_threads = True
     allow_reuse_address = True
+
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        RequestHandlerClass: type,
+        *,
+        max_workers: int,
+    ) -> None:
+        super().__init__(server_address, RequestHandlerClass)
+        self._worker_sem = threading.BoundedSemaphore(max(1, max_workers))
+        self._active_handler_count = 0
+        self._active_handler_lock = threading.Lock()
+
+    @property
+    def active_handler_count(self) -> int:
+        with self._active_handler_lock:
+            return self._active_handler_count
+
+    def process_request(self, request: object, client_address: object) -> None:
+        if not self._worker_sem.acquire(blocking=False):
+            try:
+                request.close()  # type: ignore[union-attr]
+            except Exception:
+                pass
+            return
+        t = threading.Thread(
+            target=self._dispatch_request,
+            args=(request, client_address),
+            daemon=True,
+            name="hw-recall-handler",
+        )
+        t.start()
+
+    def _dispatch_request(self, request: object, client_address: object) -> None:
+        with self._active_handler_lock:
+            self._active_handler_count += 1
+        try:
+            self.finish_request(request, client_address)
+        except Exception:
+            self.handle_error(request, client_address)
+        finally:
+            with self._active_handler_lock:
+                self._active_handler_count -= 1
+            self.shutdown_request(request)
+            self._worker_sem.release()
 
 
 def build_handler(
@@ -924,47 +1002,75 @@ def build_handler(
         default_tenant=engine.default_tenant,
     )
     rate_limiter = RecallRateLimiter()
+    conn_timeout = _connection_timeout_s()
+    max_body = _max_request_body_bytes()
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "HeartwoodRecall/0.1"
+        # R1: per-connection socket timeout covers TLS handshake, header read,
+        # and body read.  Applied by BaseHTTPRequestHandler.setup() via
+        # self.connection.settimeout(self.timeout).
+        timeout = conn_timeout
 
         def log_message(self, format: str, *args):  # noqa: A002
+            # Suppress the default Common Log Format line (contains raw path).
+            # R3 request lifecycle logs are emitted by _log_lifecycle() instead.
             return
 
         def do_GET(self):  # noqa: N802
-            if self.path == "/health":
-                self._json(engine.health())
-                return
-            if self.path == _LOCAL_READINESS_PATH:
-                if not self._local_diagnostics_allowed():
-                    self._json({"ok": False, "error": "not_found"}, status=404)
+            req_id = _next_request_id()
+            path_cat = _path_category(self.path)
+            _log_lifecycle(req_id, path_cat, "start")
+            started = time.monotonic()
+            status = 200
+            try:
+                if self.path == "/health":
+                    self._json(engine.health())
                     return
-                credential = self._authorized(require_token=credential_store.configured)
-                if credential is False:
+                if self.path == _LOCAL_READINESS_PATH:
+                    if not self._local_diagnostics_allowed():
+                        self._json({"ok": False, "error": "not_found"}, status=404)
+                        status = 404
+                        return
+                    credential = self._authorized(require_token=credential_store.configured)
+                    if credential is False:
+                        status = 401
+                        return
+                    self._json(engine.local_readiness())
                     return
-                self._json(engine.local_readiness())
-                return
-            if self.path == "/metrics":
-                if self._authorized() is False:   # None (no-auth) and a valid credential both serve; only an explicit reject returns
+                if self.path == "/metrics":
+                    if self._authorized() is False:  # None (no-auth) and credential both serve
+                        status = 401
+                        return
+                    self._json(engine.metrics())
                     return
-                self._json(engine.metrics())
-                return
-            self._json({"ok": False, "error": "not_found"}, status=404)
+                self._json({"ok": False, "error": "not_found"}, status=404)
+                status = 404
+            finally:
+                _log_lifecycle(req_id, path_cat, "end", status=status, elapsed_ms=(time.monotonic() - started) * 1000.0)
 
         def do_POST(self):  # noqa: N802
+            req_id = _next_request_id()
+            path_cat = _path_category(self.path)
+            _log_lifecycle(req_id, path_cat, "start")
+            started = time.monotonic()
+            status = 200
             should_relieve_allocator = False
             try:
                 if self.path in {_LOCAL_VERIFY_ROUNDTRIP_PATH, _LOCAL_VERIFY_INGESTED_PATH}:
                     if not self._local_diagnostics_allowed():
                         self._json({"ok": False, "error": "not_found"}, status=404)
+                        status = 404
                         return
                     credential = self._authorized(require_token=True)
                     if credential is False:
+                        status = 401
                         return
-                    payload = self._read_json()
+                    payload = self._read_json(max_body)
                     principal = credential.principal
                     if not _local_diagnostics_admin_allowed(principal):
                         self._json({"ok": False, "error": "diagnostic_admin_required"}, status=403)
+                        status = 403
                         return
                     if self.path == _LOCAL_VERIFY_ROUNDTRIP_PATH:
                         self._json(engine.verify_roundtrip(payload, principal=principal))
@@ -975,12 +1081,14 @@ def build_handler(
                 if self.path == "/forget":
                     credential = self._authorized(require_token=True)
                     if credential is False:
+                        status = 401
                         return
                 else:
                     credential = self._authorized()
                     if credential is False:
+                        status = 401
                         return
-                payload = self._read_json()
+                payload = self._read_json(max_body)
                 if self.path in {"/recall", "/explain-recall"}:
                     should_relieve_allocator = True
                     principal = credential.principal if isinstance(credential, RecallCredential) else None
@@ -1013,9 +1121,15 @@ def build_handler(
                     self._json(engine.warm(tenants or None))
                     return
                 self._json({"ok": False, "error": "not_found"}, status=404)
+                status = 404
+            except RequestBodyTooLargeError as exc:
+                status = 413
+                self._json({"ok": False, "error": str(exc)}, status=413)
             except Exception as exc:
+                status = 400
                 self._json({"ok": False, "error": str(exc)}, status=400)
             finally:
+                _log_lifecycle(req_id, path_cat, "end", status=status, elapsed_ms=(time.monotonic() - started) * 1000.0)
                 if should_relieve_allocator:
                     _relieve_allocator_pressure_now()
 
@@ -1052,8 +1166,13 @@ def build_handler(
                 return False
             return _is_loopback_address(str(self.client_address[0]))
 
-        def _read_json(self) -> dict[str, Any]:
+        def _read_json(self, max_bytes: int) -> dict[str, Any]:
+            # R1: enforce body size cap before reading; treat absent/zero Content-Length as empty body.
             raw_len = int(self.headers.get("Content-Length") or 0)
+            if raw_len > max_bytes:
+                raise RequestBodyTooLargeError(
+                    f"request body too large: Content-Length {raw_len} exceeds limit {max_bytes}"
+                )
             raw = self.rfile.read(raw_len) if raw_len else b"{}"
             return json.loads(raw.decode("utf-8") or "{}")
 
@@ -1104,17 +1223,21 @@ def serve_recall(
         if warm_on_start:
             engine.warm(warm_tenants or [default_tenant])
         engine.assert_ready_to_serve(allow_dev_models=dev_models)
-        server = RecallHTTPServer(
+        # R1: use BoundedThreadingHTTPServer so the accept loop runs on a
+        # dedicated thread, independent of handler worker threads.
+        server = BoundedThreadingHTTPServer(
             (host, port),
             build_handler(engine, token=token, token_file=token_file),
+            max_workers=_max_concurrent_handlers(),
         )
-        if tls_cert_file or tls_key_file:
+        tls_enabled = bool(tls_cert_file or tls_key_file)
+        if tls_enabled:
             if not tls_cert_file or not tls_key_file:
                 raise ValueError("TLS requires both tls_cert_file and tls_key_file")
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.load_cert_chain(str(tls_cert_file), str(tls_key_file))
             server.socket = context.wrap_socket(server.socket, server_side=True)
-        scheme = "https" if tls_cert_file else "http"
+        scheme = "https" if tls_enabled else "http"
         print(
             json.dumps(
                 {
@@ -1125,6 +1248,15 @@ def serve_recall(
                 }
             ),
             flush=True,
+        )
+        # R2: start the listener-progress watchdog after the server is bound
+        # so the probe port is already open before the first check fires.
+        _start_listener_watchdog(
+            port=server.server_port,
+            tls=tls_enabled,
+            interval_s=_listener_probe_interval_s(),
+            fail_threshold=_listener_fail_threshold(),
+            fail_window_s=_listener_fail_window_s(),
         )
         server.serve_forever()
     finally:
@@ -1708,6 +1840,232 @@ def _malloc_trim():
     except Exception:
         _MALLOC_TRIM_FN = None
     return _MALLOC_TRIM_FN
+
+
+def _connection_timeout_s() -> float:
+    return _nonnegative_float_env("HEARTWOOD_RECALL_CONNECTION_TIMEOUT_S", _DEFAULT_CONNECTION_TIMEOUT_S)
+
+
+def _max_request_body_bytes() -> int:
+    return _positive_int_env("HEARTWOOD_RECALL_MAX_BODY_BYTES", _DEFAULT_MAX_REQUEST_BODY_BYTES)
+
+
+def _max_concurrent_handlers() -> int:
+    return _positive_int_env("HEARTWOOD_RECALL_MAX_CONCURRENT_HANDLERS", _DEFAULT_MAX_CONCURRENT_HANDLERS)
+
+
+def _listener_probe_interval_s() -> float:
+    return _nonnegative_float_env("HEARTWOOD_RECALL_LISTENER_PROBE_INTERVAL_S", _DEFAULT_LISTENER_PROBE_INTERVAL_S)
+
+
+def _listener_fail_threshold() -> int:
+    return _positive_int_env("HEARTWOOD_RECALL_LISTENER_FAIL_THRESHOLD", _DEFAULT_LISTENER_FAIL_THRESHOLD)
+
+
+def _listener_fail_window_s() -> float:
+    return _nonnegative_float_env("HEARTWOOD_RECALL_LISTENER_FAIL_WINDOW_S", _DEFAULT_LISTENER_FAIL_WINDOW_S)
+
+
+def _next_request_id() -> str:
+    global _REQUEST_LIFECYCLE_COUNTER
+    with _REQUEST_LIFECYCLE_LOCK:
+        _REQUEST_LIFECYCLE_COUNTER += 1
+        return f"rq{_REQUEST_LIFECYCLE_COUNTER:06d}"
+
+
+def _path_category(path: str) -> str:
+    p = path.split("?")[0]
+    if p == "/health":
+        return "health"
+    if p in {"/recall", "/explain-recall"}:
+        return "recall"
+    if p == "/forget":
+        return "forget"
+    if p == "/metrics":
+        return "metrics"
+    if p == "/warm":
+        return "warm"
+    if p.startswith("/local/"):
+        return "local_diag"
+    return "other"
+
+
+def _log_lifecycle(
+    request_id: str,
+    path_cat: str,
+    stage: str,
+    *,
+    status: int = 0,
+    elapsed_ms: float = 0.0,
+) -> None:
+    """Emit a sanitized request lifecycle log line (R3).
+
+    Logs only: request_id, path_category, stage (start/end), HTTP status,
+    and elapsed milliseconds.  Query content, request body, Authorization
+    headers, and result data are NEVER logged here.
+    """
+    ts = _watchdog_log_timestamp()
+    if stage == "start":
+        print(f"{ts} hw-recall req={request_id} path_cat={path_cat} start", file=sys.stderr, flush=True)
+    else:
+        print(
+            f"{ts} hw-recall req={request_id} path_cat={path_cat} end"
+            f" status={status} elapsed_ms={elapsed_ms:.0f}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+def _capture_listener_stall_diagnostics(*, fail_count: int) -> Path | None:
+    """Emit a sanitized stall diagnostic snapshot (R2/R3).
+
+    Writes process metrics and all Python thread stacks to stderr and to the
+    diagnostic log file.  faulthandler.dump_traceback() emits only function
+    names, file paths, and line numbers — no variable values, no auth tokens,
+    no query content.  It is therefore inherently sanitized.
+    """
+    path = _watchdog_diag_log_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return None
+
+    sample = _current_memory_sample()
+    header = {
+        "timestamp": _watchdog_log_timestamp(),
+        "reason": "listener-stall",
+        "pid": os.getpid(),
+        "fail_count": fail_count,
+        "ps_rss_mb": _round_or_none(sample.ps_rss_mb),
+        "phys_footprint_mb": _round_or_none(sample.phys_footprint_mb),
+        "threading_active_count": threading.active_count(),
+        "torch_thread_count": _torch_thread_count(),
+    }
+    header_text = (
+        "\n=== heartwood recall listener stall diagnostic ===\n"
+        + json.dumps(header, sort_keys=True, separators=(",", ":"))
+        + "\n--- Python thread stacks ---\n"
+    )
+    # Emit to stderr first so Fly's log buffer captures it even if disk is full.
+    print(header_text, file=sys.stderr, flush=True)
+    try:
+        faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+    except Exception:
+        pass
+
+    try:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(header_text)
+            faulthandler.dump_traceback(file=handle, all_threads=True)
+            handle.write("\n")
+        return path
+    except Exception:
+        return None
+
+
+def _start_listener_watchdog(
+    *,
+    port: int,
+    tls: bool,
+    interval_s: float,
+    fail_threshold: int,
+    fail_window_s: float,
+    stop_event: threading.Event | None = None,
+) -> None:
+    """Start the listener-progress watchdog daemon thread (R2).
+
+    The watchdog probes ``/health`` on the loopback address every ``interval_s``
+    seconds.  If ``fail_threshold`` consecutive failures occur within
+    ``fail_window_s`` seconds, it emits a sanitized diagnostic snapshot and
+    calls ``os._exit(75)`` so Fly's ``restart=always`` replaces the process.
+
+    The watchdog is independent of the serving thread.  With the bounded
+    threading server (R1), ``/health`` is handled by a worker thread and is not
+    blocked by a stalled recall operation.  If all worker slots are occupied,
+    the probe connection is closed immediately, which the watchdog counts as a
+    failure — signalling an overloaded or stalled pool.
+
+    Set ``HEARTWOOD_RECALL_LISTENER_WATCHDOG=0`` to disable.
+    """
+    if os.environ.get("HEARTWOOD_RECALL_LISTENER_WATCHDOG", "1") in {"0", "false", "False"}:
+        return
+
+    scheme = "https" if tls else "http"
+    probe_url = f"{scheme}://127.0.0.1:{port}/health"
+
+    # Build a TLS context that accepts any certificate for loopback probes.
+    # This is intentionally insecure; we trust 127.0.0.1 and only need to
+    # speak TLS (not verify the cert) to exercise the real server code path.
+    if tls:
+        _probe_ctx: ssl.SSLContext | None = ssl.create_default_context()
+        assert _probe_ctx is not None
+        _probe_ctx.check_hostname = False
+        _probe_ctx.verify_mode = ssl.CERT_NONE
+    else:
+        _probe_ctx = None
+
+    def _probe() -> bool:
+        try:
+            req = request.Request(probe_url, method="GET")
+            with request.urlopen(req, timeout=5.0, context=_probe_ctx) as resp:  # type: ignore[arg-type]
+                body = json.loads(resp.read().decode("utf-8"))
+                return bool(body.get("ok"))
+        except Exception:
+            return False
+
+    def watch() -> None:
+        # One grace-period sleep before the first probe so the server has time
+        # to complete startup (model loading, DB open) without false failures.
+        time.sleep(interval_s)
+
+        fail_timestamps: list[float] = []
+        probe_ok_count = 0
+
+        while stop_event is None or not stop_event.is_set():
+            now = time.monotonic()
+            if _probe():
+                fail_timestamps.clear()
+                probe_ok_count += 1
+                # R3 listener heartbeat: log periodically so Fly logs show liveness.
+                if probe_ok_count % 4 == 0:
+                    ts = _watchdog_log_timestamp()
+                    print(
+                        f"{ts} hw-recall listener heartbeat ok"
+                        f" interval={interval_s:.0f}s probes_ok={probe_ok_count}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+            else:
+                fail_timestamps.append(now)
+                # Prune failures older than the window.
+                fail_timestamps = [t for t in fail_timestamps if now - t <= fail_window_s]
+                ts = _watchdog_log_timestamp()
+                print(
+                    f"{ts} hw-recall listener probe failed"
+                    f" consecutive_in_window={len(fail_timestamps)}/{fail_threshold}"
+                    f" window_s={fail_window_s:.0f}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                # R3 incident snapshot: on first failure after healthy period.
+                if len(fail_timestamps) == 1 or len(fail_timestamps) >= fail_threshold:
+                    _capture_listener_stall_diagnostics(fail_count=len(fail_timestamps))
+                if len(fail_timestamps) >= fail_threshold:
+                    print(
+                        f"{ts} hw-recall listener stall threshold reached"
+                        f" fail_count={len(fail_timestamps)} exit=75",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    os._exit(75)
+
+            time.sleep(interval_s)
+
+    threading.Thread(
+        target=watch,
+        name="hw-listener-watchdog",
+        daemon=True,
+    ).start()
 
 
 def _start_memory_watchdog() -> None:

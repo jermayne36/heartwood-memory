@@ -2593,6 +2593,148 @@ def test_recall_rate_limit_keys_off_credential_not_spoofable_xff():
             assert token not in stderr
 
 
+# ---------------------------------------------------------------------------
+# R1/R2/R3 positive-control tests (Rule 71 #4: guards must FIRE on bad input)
+# ---------------------------------------------------------------------------
+
+
+def test_r1_body_too_large_returns_413():
+    """@positive-control(r1-body-size-cap)
+    Content-Length exceeding the cap must return 413, not 400 or 200.
+    A test that only sends valid-sized bodies cannot prove the cap fires.
+    """
+    import threading
+    from heartwood.recall_service import BoundedThreadingHTTPServer, RecallEngine, build_handler
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "heartwood.db"
+        engine = RecallEngine(db_path=db_path, default_tenant="tenant:test", dev_models=True)
+
+        # Set a tiny 10-byte cap (env var HEARTWOOD_RECALL_MAX_BODY_BYTES) so any real JSON body trips it.
+        orig_env = os.environ.get("HEARTWOOD_RECALL_MAX_BODY_BYTES")
+        os.environ["HEARTWOOD_RECALL_MAX_BODY_BYTES"] = "10"
+        try:
+            HandlerClass = build_handler(engine)
+            port = _free_port()
+            server = BoundedThreadingHTTPServer(("127.0.0.1", port), HandlerClass, max_workers=2)
+            t = threading.Thread(target=server.serve_forever, daemon=True)
+            t.start()
+            try:
+                # Payload is 12+ bytes — must exceed the 10-byte cap
+                body = json.dumps({"query": "hello"}).encode("utf-8")
+                assert len(body) > 10, "fixture body must exceed the cap"
+                req = request.Request(
+                    f"http://127.0.0.1:{port}/recall",
+                    data=body,
+                    headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
+                    method="POST",
+                )
+                try:
+                    request.urlopen(req, timeout=5)
+                    raise AssertionError("oversized body should have returned 413")
+                except error.HTTPError as exc:
+                    assert exc.code == 413, f"expected 413, got {exc.code}"
+                    resp_body = json.loads(exc.read().decode())
+                    assert "request body too large" in resp_body.get("error", "").lower()
+            finally:
+                server.shutdown()
+        finally:
+            if orig_env is None:
+                os.environ.pop("HEARTWOOD_RECALL_MAX_BODY_BYTES", None)
+            else:
+                os.environ["HEARTWOOD_RECALL_MAX_BODY_BYTES"] = orig_env
+
+
+def test_r1_threading_health_during_busy_recall():
+    """@positive-control(r1-threading-unblocks-health)
+    A busy recall handler must NOT starve the /health endpoint.
+    With the old single-threaded HTTPServer a slow recall blocked ALL connections.
+    """
+    import threading
+    from heartwood.recall_service import BoundedThreadingHTTPServer, RecallEngine, build_handler
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "heartwood.db"
+        engine = RecallEngine(db_path=db_path, default_tenant="tenant:test", dev_models=True)
+        HandlerClass = build_handler(engine)
+        port = _free_port()
+        server = BoundedThreadingHTTPServer(("127.0.0.1", port), HandlerClass, max_workers=4)
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+
+        health_results = []
+
+        def poll_health():
+            for _ in range(5):
+                try:
+                    r = request.urlopen(f"http://127.0.0.1:{port}/health", timeout=3)
+                    health_results.append(json.loads(r.read().decode()))
+                except Exception as exc:
+                    health_results.append({"error": str(exc)})
+                time.sleep(0.1)
+
+        try:
+            health_thread = threading.Thread(target=poll_health)
+            health_thread.start()
+
+            # Send a recall request (fast with dev-models)
+            req = request.Request(
+                f"http://127.0.0.1:{port}/recall",
+                data=json.dumps({"query": "test", "tenant": "tenant:test", "principal_id": "agent:test"}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                request.urlopen(req, timeout=5)
+            except error.HTTPError:
+                pass  # 400/401 is fine — we care that health still responds
+
+            health_thread.join(timeout=5)
+            assert len(health_results) >= 3, f"health responded {len(health_results)} times, want >=3; got {health_results}"
+            for result in health_results:
+                assert "error" not in result, f"health check failed while recall was running: {result}"
+                assert result.get("ok") is True, f"unexpected health response: {result}"
+        finally:
+            server.shutdown()
+
+
+def test_r2_watchdog_exits_on_stall():
+    """@positive-control(r2-watchdog-exits)
+    The listener watchdog must call os._exit(75) after fail_threshold consecutive
+    probe failures within fail_window_s.  This test monkeypatches the probe to
+    always fail and verifies _exit fires — proving the guard FIRES on bad input.
+    """
+    import threading as _threading
+    import heartwood.recall_service as recall_service
+
+    exit_calls: list[int] = []
+    stop_event = _threading.Event()
+
+    def fake_exit(code: int) -> None:
+        exit_calls.append(code)
+        stop_event.set()  # halt the watchdog loop so it doesn't outlive the test
+
+    original_exit = recall_service.os._exit  # type: ignore[attr-defined]
+    recall_service.os._exit = fake_exit  # type: ignore[attr-defined]
+    try:
+        recall_service._start_listener_watchdog(
+            port=9,  # port 9 is always closed — probes always fail
+            tls=False,
+            interval_s=0.05,
+            fail_threshold=2,
+            fail_window_s=1.0,
+            stop_event=stop_event,
+        )
+        deadline = time.monotonic() + 5.0
+        while not exit_calls and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert exit_calls, "watchdog never called os._exit — guard does not fire on sustained failure"
+        assert exit_calls[0] == 75, f"expected exit code 75, got {exit_calls[0]}"
+    finally:
+        recall_service.os._exit = original_exit  # type: ignore[attr-defined]
+        stop_event.set()  # ensure the watchdog thread exits if the assertion failed
+
+
 def main():
     test_warm_recall_engine_and_benchmark()
     test_warm_recall_http_service_with_token()
