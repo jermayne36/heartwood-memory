@@ -1,14 +1,8 @@
-name: Signed Python release
+name: Heartwood CI and signed release
 
 on:
   workflow_dispatch:
   pull_request:
-    paths:
-      - ".github/workflows/release.yml"
-      - "heartwood/**"
-      - "scripts/build_release.py"
-      - "tests/test_build_release.py"
-      - "pyproject.toml"
   push:
     tags:
       - "v*"
@@ -21,7 +15,48 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  pull-request-ci:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Prove the release signing key is unavailable to pull-request code
+        shell: bash
+        run: |
+          assert_release_signing_key_absent() {
+            # @fail-closed(release-signing-key-pr-boundary)
+            if [[ "${HEARTWOOD_RELEASE_SIGNING_KEY_B64+x}" == "x" ]]; then
+              echo "HEARTWOOD_RELEASE_SIGNING_KEY_B64 is unexpectedly present in pull-request CI" >&2
+              return 1
+            fi
+          }
+
+          # @positive-control(release-signing-key-pr-boundary)
+          if HEARTWOOD_RELEASE_SIGNING_KEY_B64=positive-control assert_release_signing_key_absent 2>/dev/null; then
+            echo "release signing-key boundary positive control did not fire" >&2
+            exit 1
+          fi
+          echo "release_signing_key_positive_control=blocked"
+
+          assert_release_signing_key_absent
+          echo "release_signing_key_present=false"
+      - name: Install CI dependencies
+        run: python -m pip install -e ".[dev]" twine
+      - name: Lint and test before build
+        run: bash scripts/check.sh
+      - name: Build unsigned wheel and sdist
+        run: python -m build --wheel --sdist --outdir dist
+      - name: Verify unsigned package metadata
+        run: python -m twine check dist/heartwood_memory-*.whl dist/heartwood_memory-*.tar.gz
+
   build-sign-verify:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     env:
       HEARTWOOD_RELEASE_SIGNING_KEY_B64: ${{ secrets.HEARTWOOD_RELEASE_SIGNING_KEY_B64 }}
