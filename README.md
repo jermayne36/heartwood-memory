@@ -1,5 +1,7 @@
 # Heartwood Memory
 
+<!-- CI README-only trigger probe for task 10006720; this change will not be merged. -->
+
 <!-- mcp-name: io.github.jermayne36/heartwood-memory -->
 
 **Heartwood Memory is a governed memory store for AI agents: provenance-signed

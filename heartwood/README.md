@@ -1,7 +1,5 @@
 # Heartwood Memory
 
-<!-- CI path-boundary probe for task 10006732; this change will not be merged. -->
-
 A provenance-first, embedded agent-memory library. The differentiator is
 **governance** — tamper-evident provenance, policy-enforced recall, and
 crypto-shred erasure — layered over **benchmark-validated hybrid retrieval**
