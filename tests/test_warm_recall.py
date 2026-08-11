@@ -2779,6 +2779,8 @@ def test_r1_tls_handshake_does_not_starve_accept_loop(tmp_path):
         stalled.settimeout(2)
         try:
             closed = stalled.recv(1) == b""
+        except socket.timeout:
+            closed = False
         except (ConnectionError, OSError):
             closed = True
         finally:
@@ -2844,24 +2846,25 @@ def test_r1_threading_health_during_busy_recall():
             server.shutdown()
 
 
-def test_r2_pool_saturation_does_not_trigger_listener_exit():
-    """@positive-control(r2-probe-capacity-reserved)
-    Saturating every general worker must leave the loopback probe slot alive,
-    while the separate true-stall control still proves exit 75 fires.
+def test_r2_wedged_pool_triggers_listener_exit(tmp_path, monkeypatch):
+    """@positive-control(r2-worker-pool-progress-watchdog)
+    A fully occupied general pool with no completed handlers must exit 75 even
+    though the listener's reserved /health probe continues to return 200.
     """
     import threading as _threading
     import heartwood.recall_service as recall_service
 
+    monkeypatch.setenv("HEARTWOOD_RECALL_DIAG_LOG", str(tmp_path / "pool-stall.diag.log"))
     with tempfile.TemporaryDirectory() as temp_dir:
         engine = RecallEngine(
             db_path=Path(temp_dir) / "heartwood.db",
             default_tenant="tenant:test",
             dev_models=True,
         )
-        port = _free_port()
         server = recall_service.BoundedThreadingHTTPServer(
-            ("127.0.0.1", port), recall_service.build_handler(engine), max_workers=2
+            ("127.0.0.1", 0), recall_service.build_handler(engine), max_workers=2
         )
+        port = server.server_port
         _threading.Thread(target=server.serve_forever, daemon=True).start()
         engine._lock.acquire()
 
@@ -2908,11 +2911,12 @@ def test_r2_pool_saturation_does_not_trigger_listener_exit():
                 fail_threshold=2,
                 fail_window_s=1.0,
                 stop_event=stop_event,
+                server=server,
             )
-            time.sleep(0.35)
-            assert not exit_calls, f"healthy saturated server was killed: {exit_calls}"
-            with request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1) as response:
-                assert json.loads(response.read().decode())["ok"] is True
+            deadline = time.monotonic() + 5.0
+            while not exit_calls and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert exit_calls == [75], f"wedged general pool did not trigger exit 75: {exit_calls}"
         finally:
             recall_service.os._exit = original_exit  # type: ignore[attr-defined]
             stop_event.set()
@@ -2920,6 +2924,148 @@ def test_r2_pool_saturation_does_not_trigger_listener_exit():
             for busy_thread in busy_threads:
                 busy_thread.join(timeout=5)
             server.shutdown()
+
+
+def test_r2_saturated_but_progressing_pool_survives_watchdog():
+    """A fully occupied pool that completes work between probes must survive."""
+    import threading as _threading
+    from http.server import BaseHTTPRequestHandler
+    import heartwood.recall_service as recall_service
+
+    class HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = b'{"ok":true}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args):  # noqa: A002
+            return
+
+    class ProgressingPoolView:
+        completed = 0
+
+        @property
+        def general_worker_snapshot(self) -> tuple[int, int, int]:
+            self.completed += 1
+            return (2, 2, self.completed)
+
+    health_server = recall_service.BoundedThreadingHTTPServer(
+        ("127.0.0.1", 0), HealthHandler, max_workers=1
+    )
+    port = health_server.server_port
+    _threading.Thread(target=health_server.serve_forever, daemon=True).start()
+    stop_event = _threading.Event()
+    exit_calls: list[int] = []
+
+    def fake_exit(code: int) -> None:
+        exit_calls.append(code)
+        stop_event.set()
+
+    original_exit = recall_service.os._exit  # type: ignore[attr-defined]
+    recall_service.os._exit = fake_exit  # type: ignore[attr-defined]
+    try:
+        recall_service._start_listener_watchdog(
+            port=port,
+            tls=False,
+            interval_s=0.05,
+            fail_threshold=2,
+            fail_window_s=1.0,
+            stop_event=stop_event,
+            server=ProgressingPoolView(),  # type: ignore[arg-type]
+        )
+        time.sleep(0.35)
+        assert not exit_calls, f"progressing saturated pool was killed: {exit_calls}"
+    finally:
+        recall_service.os._exit = original_exit  # type: ignore[attr-defined]
+        stop_event.set()
+        health_server.shutdown()
+
+
+def test_r2_reserved_capacity_handles_operator_and_probe_concurrently():
+    """@positive-control(r2-probe-capacity-reserved)
+    One saturated general worker plus one slow loopback diagnostic must still
+    leave a second reserved loopback slot for the watchdog health request.
+    """
+    import threading as _threading
+    from http.server import BaseHTTPRequestHandler
+    import heartwood.recall_service as recall_service
+
+    general_entered = _threading.Event()
+    general_release = _threading.Event()
+    operator_entered = _threading.Event()
+    operator_release = _threading.Event()
+
+    class BlockingHandler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            if self.path == "/work":
+                general_entered.set()
+                general_release.wait(timeout=5)
+            elif self.path == "/local/readiness":
+                operator_entered.set()
+                operator_release.wait(timeout=5)
+            body = b'{"ok":true}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args):  # noqa: A002
+            return
+
+    server = recall_service.BoundedThreadingHTTPServer(
+        ("127.0.0.1", 0), BlockingHandler, max_workers=1
+    )
+    port = server.server_port
+    _threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    def fetch(path: str) -> None:
+        with request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5) as response:
+            assert json.loads(response.read().decode())["ok"] is True
+
+    general_thread = _threading.Thread(target=fetch, args=("/work",), daemon=True)
+    operator_thread = _threading.Thread(
+        target=fetch, args=("/local/readiness",), daemon=True
+    )
+    try:
+        general_thread.start()
+        assert general_entered.wait(timeout=2), "general worker did not saturate"
+        operator_thread.start()
+        assert operator_entered.wait(timeout=2), "operator did not occupy reserved capacity"
+        with request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1) as response:
+            assert json.loads(response.read().decode())["ok"] is True
+    finally:
+        general_release.set()
+        operator_release.set()
+        general_thread.join(timeout=5)
+        operator_thread.join(timeout=5)
+        server.shutdown()
+
+
+def test_r3_expected_connection_error_is_sanitized(capsys):
+    """Expected pre-auth TLS errors must not disclose peer IPs or tracebacks."""
+    import ssl
+    from http.server import BaseHTTPRequestHandler
+    import heartwood.recall_service as recall_service
+
+    server = recall_service.BoundedThreadingHTTPServer(
+        ("127.0.0.1", 0), BaseHTTPRequestHandler, max_workers=1
+    )
+    try:
+        try:
+            raise ssl.SSLEOFError(8, "attacker-controlled-detail")
+        except ssl.SSLError:
+            server.handle_error(object(), ("203.0.113.42", 45678))
+    finally:
+        server.server_close()
+    stderr = capsys.readouterr().err
+    assert "hw-recall connection closed category=tls" in stderr
+    assert "Traceback" not in stderr
+    assert "203.0.113.42" not in stderr
+    assert "attacker-controlled-detail" not in stderr
 
 
 def test_r1_r2_zero_timing_env_values_fall_back(monkeypatch):
@@ -2953,6 +3099,27 @@ def test_r2_watchdog_rejects_unreachable_threshold_ratio():
             fail_window_s=0.9,
             stop_event=_threading.Event(),
         )
+
+
+def test_r2_watchdog_config_is_validated_before_success_banner(
+    tmp_path, monkeypatch, capsys
+):
+    """Invalid watchdog config must fail before DB open, bind, or success output."""
+    import heartwood.recall_service as recall_service
+
+    monkeypatch.setenv("HEARTWOOD_RECALL_WATCHDOG", "0")
+    monkeypatch.setenv("HEARTWOOD_RECALL_LISTENER_WATCHDOG", "1")
+    monkeypatch.setenv("HEARTWOOD_RECALL_LISTENER_PROBE_INTERVAL_S", "1")
+    monkeypatch.setenv("HEARTWOOD_RECALL_LISTENER_FAIL_THRESHOLD", "3")
+    monkeypatch.setenv("HEARTWOOD_RECALL_LISTENER_FAIL_WINDOW_S", "1")
+    with pytest.raises(ValueError, match="cannot reach its failure threshold"):
+        recall_service.serve_recall(
+            db_path=tmp_path / "must-not-open.db",
+            dev_models=True,
+            warm_on_start=False,
+        )
+    assert capsys.readouterr().out == ""
+    assert not (tmp_path / "must-not-open.db").exists()
 
 
 def test_r2_watchdog_exits_on_stall():

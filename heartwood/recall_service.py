@@ -72,6 +72,7 @@ _DEFAULT_CONNECTION_TIMEOUT_S = 30.0
 _DEFAULT_TLS_HANDSHAKE_TIMEOUT_S = 5.0
 _DEFAULT_MAX_REQUEST_BODY_BYTES = 256 * 1024  # 256 KB
 _DEFAULT_MAX_CONCURRENT_HANDLERS = 4
+_DEFAULT_RESERVED_LOOPBACK_HANDLERS = 2
 
 # R2: listener-progress watchdog
 _DEFAULT_LISTENER_PROBE_INTERVAL_S = 30.0
@@ -953,9 +954,12 @@ class BoundedThreadingHTTPServer(ThreadingMixIn, HTTPServer):
         max_workers: int,
     ) -> None:
         super().__init__(server_address, RequestHandlerClass)
-        self._worker_sem = threading.BoundedSemaphore(max(1, max_workers))
-        self._probe_sem = threading.BoundedSemaphore(1)
+        self._max_workers = max(1, max_workers)
+        self._worker_sem = threading.BoundedSemaphore(self._max_workers)
+        self._probe_sem = threading.BoundedSemaphore(_DEFAULT_RESERVED_LOOPBACK_HANDLERS)
         self._active_handler_count = 0
+        self._active_general_handler_count = 0
+        self._completed_general_handler_count = 0
         self._active_handler_lock = threading.Lock()
 
     @property
@@ -963,20 +967,32 @@ class BoundedThreadingHTTPServer(ThreadingMixIn, HTTPServer):
         with self._active_handler_lock:
             return self._active_handler_count
 
+    @property
+    def general_worker_snapshot(self) -> tuple[int, int, int]:
+        """Return active, capacity, and completed counts for general workers."""
+        with self._active_handler_lock:
+            return (
+                self._active_general_handler_count,
+                self._max_workers,
+                self._completed_general_handler_count,
+            )
+
     def process_request(self, request: object, client_address: object) -> None:
         # @fail-closed(r1-threading-unblocks-health)
         worker_sem = self._worker_sem
+        general_worker = True
         if not worker_sem.acquire(blocking=False):
             # @fail-closed(r2-probe-capacity-reserved)
             is_loopback = _is_loopback_address(str(client_address[0]))  # type: ignore[index]
             if is_loopback and self._probe_sem.acquire(blocking=False):
                 worker_sem = self._probe_sem
+                general_worker = False
             else:
                 self.shutdown_request(request)
                 return
         t = threading.Thread(
             target=self._dispatch_request,
-            args=(request, client_address, worker_sem),
+            args=(request, client_address, worker_sem, general_worker),
             daemon=True,
             name="hw-recall-handler",
         )
@@ -987,9 +1003,12 @@ class BoundedThreadingHTTPServer(ThreadingMixIn, HTTPServer):
         request: object,
         client_address: object,
         worker_sem: threading.BoundedSemaphore,
+        general_worker: bool,
     ) -> None:
         with self._active_handler_lock:
             self._active_handler_count += 1
+            if general_worker:
+                self._active_general_handler_count += 1
         try:
             self.finish_request(request, client_address)
         except Exception:
@@ -997,8 +1016,30 @@ class BoundedThreadingHTTPServer(ThreadingMixIn, HTTPServer):
         finally:
             with self._active_handler_lock:
                 self._active_handler_count -= 1
+                if general_worker:
+                    self._active_general_handler_count -= 1
+                    self._completed_general_handler_count += 1
             self.shutdown_request(request)
             worker_sem.release()
+
+    def handle_error(self, request: object, client_address: object) -> None:
+        """Suppress expected pre-auth connection failures without leaking peers."""
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ssl.SSLError, TimeoutError, ConnectionError)):
+            if isinstance(exc, ssl.SSLError):
+                category = "tls"
+            elif isinstance(exc, TimeoutError):
+                category = "timeout"
+            else:
+                category = "disconnect"
+            print(
+                f"{_watchdog_log_timestamp()} hw-recall connection closed"
+                f" category={category}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        super().handle_error(request, client_address)
 
 
 def build_handler(
@@ -1234,6 +1275,19 @@ def serve_recall(
     index: str = "numpy",
     warm_on_start: bool = True,
 ) -> None:
+    listener_watchdog_enabled = os.environ.get(
+        "HEARTWOOD_RECALL_LISTENER_WATCHDOG", "1"
+    ) not in {"0", "false", "False"}
+    listener_probe_interval_s = _listener_probe_interval_s()
+    listener_fail_threshold = _listener_fail_threshold()
+    listener_fail_window_s = _listener_fail_window_s()
+    if listener_watchdog_enabled:
+        _validate_listener_watchdog_config(
+            interval_s=listener_probe_interval_s,
+            fail_threshold=listener_fail_threshold,
+            fail_window_s=listener_fail_window_s,
+        )
+
     _disable_core_dumps()
     _start_memory_watchdog()
     engine = RecallEngine(
@@ -1283,9 +1337,10 @@ def serve_recall(
         _start_listener_watchdog(
             port=server.server_port,
             tls=tls_enabled,
-            interval_s=_listener_probe_interval_s(),
-            fail_threshold=_listener_fail_threshold(),
-            fail_window_s=_listener_fail_window_s(),
+            interval_s=listener_probe_interval_s,
+            fail_threshold=listener_fail_threshold,
+            fail_window_s=listener_fail_window_s,
+            server=server,
         )
         server.serve_forever()
     finally:
@@ -1980,7 +2035,11 @@ def _log_lifecycle(
         )
 
 
-def _capture_listener_stall_diagnostics(*, fail_count: int) -> Path | None:
+def _capture_listener_stall_diagnostics(
+    *,
+    fail_count: int,
+    reason: str = "listener-stall",
+) -> Path | None:
     """Emit a sanitized stall diagnostic snapshot (R2/R3).
 
     Writes process metrics and all Python thread stacks to stderr and to the
@@ -1997,7 +2056,7 @@ def _capture_listener_stall_diagnostics(*, fail_count: int) -> Path | None:
     sample = _current_memory_sample()
     header = {
         "timestamp": _watchdog_log_timestamp(),
-        "reason": "listener-stall",
+        "reason": reason,
         "pid": os.getpid(),
         "fail_count": fail_count,
         "ps_rss_mb": _round_or_none(sample.ps_rss_mb),
@@ -2006,7 +2065,7 @@ def _capture_listener_stall_diagnostics(*, fail_count: int) -> Path | None:
         "torch_thread_count": _torch_thread_count(),
     }
     header_text = (
-        "\n=== heartwood recall listener stall diagnostic ===\n"
+        f"\n=== heartwood recall {reason.replace('-', ' ')} diagnostic ===\n"
         + json.dumps(header, sort_keys=True, separators=(",", ":"))
         + "\n--- Python thread stacks ---\n"
     )
@@ -2035,6 +2094,7 @@ def _start_listener_watchdog(
     fail_threshold: int,
     fail_window_s: float,
     stop_event: threading.Event | None = None,
+    server: BoundedThreadingHTTPServer | None = None,
 ) -> None:
     """Start the listener-progress watchdog daemon thread (R2).
 
@@ -2044,9 +2104,10 @@ def _start_listener_watchdog(
     calls ``os._exit(75)`` so an external process supervisor replaces it.
 
     The watchdog is independent of the serving thread.  With the bounded
-    threading server (R1), loopback probes have one reserved overflow slot.
-    Pool saturation therefore remains an overload signal without being
-    misclassified as listener starvation.
+    threading server (R1), loopback probes have reserved overflow capacity.
+    Successful probes distinguish a live listener from a dead one; sustained
+    full general-worker saturation without a completed handler independently
+    detects a wedged pool.  Progressing saturation resets that second signal.
 
     Set ``HEARTWOOD_RECALL_LISTENER_WATCHDOG=0`` to disable.
     """
@@ -2087,15 +2148,57 @@ def _start_listener_watchdog(
         time.sleep(interval_s)
 
         fail_timestamps: list[float] = []
+        pool_stall_timestamps: list[float] = []
         probe_ok_count = 0
+        completed_general_handlers = (
+            server.general_worker_snapshot[2] if server is not None else 0
+        )
 
         while stop_event is None or not stop_event.is_set():
             now = time.monotonic()
             if _probe():
                 fail_timestamps.clear()
-                probe_ok_count += 1
+                pool_stalled = False
+                if server is not None:
+                    active, capacity, completed = server.general_worker_snapshot
+                    if completed != completed_general_handlers or active < capacity:
+                        pool_stall_timestamps.clear()
+                    else:
+                        # @fail-closed(r2-worker-pool-progress-watchdog)
+                        pool_stall_timestamps.append(now)
+                        pool_stall_timestamps = [
+                            t for t in pool_stall_timestamps if now - t <= fail_window_s
+                        ]
+                        pool_stalled = True
+                        ts = _watchdog_log_timestamp()
+                        print(
+                            f"{ts} hw-recall worker pool no progress"
+                            f" consecutive_in_window={len(pool_stall_timestamps)}/{fail_threshold}"
+                            f" active={active}/{capacity} window_s={fail_window_s:.0f}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        if (
+                            len(pool_stall_timestamps) == 1
+                            or len(pool_stall_timestamps) >= fail_threshold
+                        ):
+                            _capture_listener_stall_diagnostics(
+                                fail_count=len(pool_stall_timestamps),
+                                reason="worker-pool-stall",
+                            )
+                        if len(pool_stall_timestamps) >= fail_threshold:
+                            print(
+                                f"{ts} hw-recall worker pool stall threshold reached"
+                                f" fail_count={len(pool_stall_timestamps)} exit=75",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                            os._exit(75)
+                    completed_general_handlers = completed
+                if not pool_stalled:
+                    probe_ok_count += 1
                 # R3 listener heartbeat: log periodically so Fly logs show liveness.
-                if probe_ok_count % 4 == 0:
+                if not pool_stalled and probe_ok_count % 4 == 0:
                     ts = _watchdog_log_timestamp()
                     print(
                         f"{ts} hw-recall listener heartbeat ok"
@@ -2104,6 +2207,7 @@ def _start_listener_watchdog(
                         flush=True,
                     )
             else:
+                pool_stall_timestamps.clear()
                 fail_timestamps.append(now)
                 # Prune failures older than the window.
                 fail_timestamps = [t for t in fail_timestamps if now - t <= fail_window_s]
