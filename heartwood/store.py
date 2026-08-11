@@ -71,7 +71,7 @@ _MEMORY_META_COLUMNS = (
 class Store:
     def __init__(self, path: str = ":memory:"):
         self.path = str(path)
-        self.conn = sqlite3.connect(path, timeout=30.0)
+        self.conn = sqlite3.connect(path, timeout=30.0, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA busy_timeout=30000")
         self.conn.execute("PRAGMA secure_delete=ON")

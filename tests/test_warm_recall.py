@@ -63,6 +63,47 @@ def _free_port() -> int:
         sock.close()
 
 
+def _write_self_signed_tls_pair(root: Path) -> tuple[Path, Path]:
+    from datetime import datetime, timedelta, timezone
+    import ipaddress
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+    now = datetime.now(timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(
+            x509.SubjectAlternativeName(
+                [x509.DNSName("localhost"), x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]
+            ),
+            critical=False,
+        )
+        .sign(key, hashes.SHA256())
+    )
+    cert_path = root / "tls-cert.pem"
+    key_path = root / "tls-key.pem"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    return cert_path, key_path
+
+
 def _request_json(
     url: str,
     payload: dict | None = None,
@@ -2591,6 +2632,532 @@ def test_recall_rate_limit_keys_off_credential_not_spoofable_xff():
             stdout, stderr = proc.communicate(timeout=5)
             assert token not in stdout
             assert token not in stderr
+
+
+# ---------------------------------------------------------------------------
+# R1/R2/R3 positive-control tests (Rule 71 #4: guards must FIRE on bad input)
+# ---------------------------------------------------------------------------
+
+
+def test_r1_body_too_large_returns_413():
+    """@positive-control(r1-body-size-cap)
+    Oversized, negative, and malformed Content-Length values must return 413.
+    """
+    import threading
+    from heartwood.recall_service import BoundedThreadingHTTPServer, RecallEngine, build_handler
+
+    # @positive-control(r1-body-size-cap): each hostile length must hit the guard.
+
+    def raw_post(port: int, content_length: str, body: bytes) -> str:
+        sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+        request_head = (
+            f"POST /recall HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{port}\r\n"
+            f"Content-Type: application/json\r\n"
+            f"Content-Length: {content_length}\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode("ascii")
+        sock.sendall(request_head + body)
+        sock.shutdown(socket.SHUT_WR)
+        chunks: list[bytes] = []
+        while chunk := sock.recv(65536):
+            chunks.append(chunk)
+        sock.close()
+        return b"".join(chunks).decode("utf-8", "replace")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "heartwood.db"
+        engine = RecallEngine(db_path=db_path, default_tenant="tenant:test", dev_models=True)
+
+        # Set a tiny 10-byte cap (env var HEARTWOOD_RECALL_MAX_BODY_BYTES) so any real JSON body trips it.
+        orig_env = os.environ.get("HEARTWOOD_RECALL_MAX_BODY_BYTES")
+        os.environ["HEARTWOOD_RECALL_MAX_BODY_BYTES"] = "10"
+        try:
+            HandlerClass = build_handler(engine)
+            port = _free_port()
+            server = BoundedThreadingHTTPServer(("127.0.0.1", port), HandlerClass, max_workers=2)
+            t = threading.Thread(target=server.serve_forever, daemon=True)
+            t.start()
+            try:
+                # Payload is 12+ bytes — must exceed the 10-byte cap
+                body = json.dumps({"query": "hello"}).encode("utf-8")
+                assert len(body) > 10, "fixture body must exceed the cap"
+                req = request.Request(
+                    f"http://127.0.0.1:{port}/recall",
+                    data=body,
+                    headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
+                    method="POST",
+                )
+                try:
+                    request.urlopen(req, timeout=5)
+                    raise AssertionError("oversized body should have returned 413")
+                except error.HTTPError as exc:
+                    assert exc.code == 413, f"expected 413, got {exc.code}"
+                    resp_body = json.loads(exc.read().decode())
+                    assert "request body rejected" in resp_body.get("error", "").lower()
+
+                for hostile_length in ("-1", "not-a-number"):
+                    response = raw_post(port, hostile_length, body)
+                    status_line = response.split("\r\n", 1)[0]
+                    assert " 413 " in status_line, (
+                        f"Content-Length {hostile_length!r} reached the body reader: {status_line}"
+                    )
+            finally:
+                server.shutdown()
+        finally:
+            if orig_env is None:
+                os.environ.pop("HEARTWOOD_RECALL_MAX_BODY_BYTES", None)
+            else:
+                os.environ["HEARTWOOD_RECALL_MAX_BODY_BYTES"] = orig_env
+
+
+def test_r1_tls_handshake_does_not_starve_accept_loop(tmp_path):
+    """@positive-control(r1-tls-handshake-off-accept-loop)
+    @positive-control(r1-tls-handshake-deadline)
+    A client sending no ClientHello must neither starve /health nor hold its
+    worker past the handshake deadline.
+    """
+    import ssl
+
+    cert_path, key_path = _write_self_signed_tls_pair(tmp_path)
+    db_path = tmp_path / "heartwood.db"
+    port = _free_port()
+    env = dict(os.environ)
+    env.update(
+        {
+            "HEARTWOOD_RECALL_LISTENER_WATCHDOG": "0",
+            "HEARTWOOD_RECALL_WATCHDOG": "0",
+            "HEARTWOOD_RECALL_WARM_ON_START": "0",
+            "HEARTWOOD_RECALL_TLS_HANDSHAKE_TIMEOUT_S": "0.25",
+        }
+    )
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "heartwood.cli",
+            "serve",
+            "--db",
+            str(db_path),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--tls-cert-file",
+            str(cert_path),
+            "--tls-key-file",
+            str(key_path),
+            "--dev-models",
+        ],
+        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    tls_context = ssl._create_unverified_context()
+    health_url = f"https://127.0.0.1:{port}/health"
+    try:
+        deadline = time.monotonic() + 10.0
+        while True:
+            try:
+                with request.urlopen(health_url, timeout=1, context=tls_context) as response:
+                    assert json.loads(response.read().decode())["ok"] is True
+                break
+            except Exception:
+                if proc.poll() is not None or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
+
+        stalled = socket.create_connection(("127.0.0.1", port), timeout=2)
+        time.sleep(0.1)
+        started = time.monotonic()
+        with request.urlopen(health_url, timeout=2, context=tls_context) as response:
+            assert json.loads(response.read().decode())["ok"] is True
+        assert time.monotonic() - started < 1.0
+
+        stalled.settimeout(2)
+        try:
+            closed = stalled.recv(1) == b""
+        except socket.timeout:
+            closed = False
+        except (ConnectionError, OSError):
+            closed = True
+        finally:
+            stalled.close()
+        assert closed, "silent TLS client remained open past the handshake deadline"
+    finally:
+        proc.terminate()
+        proc.communicate(timeout=5)
+
+
+def test_r1_threading_health_during_busy_recall():
+    """@positive-control(r1-threading-unblocks-health)
+    A handler deterministically stalled on the engine lock must not starve
+    /health. This fails when process_request is mutated back to synchronous.
+    """
+    import threading
+    from heartwood.recall_service import BoundedThreadingHTTPServer, RecallEngine, build_handler
+
+    # @positive-control(r1-threading-unblocks-health): the held lock forces a real stall.
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "heartwood.db"
+        engine = RecallEngine(db_path=db_path, default_tenant="tenant:test", dev_models=True)
+        HandlerClass = build_handler(engine)
+        port = _free_port()
+        server = BoundedThreadingHTTPServer(("127.0.0.1", port), HandlerClass, max_workers=4)
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+
+        recall_state: list[str] = []
+
+        def stalled_recall() -> None:
+            try:
+                req = request.Request(
+                    f"http://127.0.0.1:{port}/recall",
+                    data=json.dumps({"query": "test", "tenant": "tenant:test"}).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                request.urlopen(req, timeout=10)
+                recall_state.append("returned")
+            except Exception as exc:
+                recall_state.append(type(exc).__name__)
+
+        engine._lock.acquire()
+        try:
+            recall_thread = threading.Thread(target=stalled_recall, daemon=True)
+            recall_thread.start()
+            deadline = time.monotonic() + 3.0
+            while server.active_handler_count < 1 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert server.active_handler_count >= 1, "recall fixture never occupied a worker"
+
+            started = time.monotonic()
+            with request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1) as response:
+                health = json.loads(response.read().decode())
+            assert health["ok"] is True
+            assert time.monotonic() - started < 1.0
+            assert not recall_state, "recall did not remain stalled on the engine lock"
+        finally:
+            engine._lock.release()
+            recall_thread.join(timeout=5)
+            server.shutdown()
+
+
+def test_r2_wedged_pool_triggers_listener_exit(tmp_path, monkeypatch):
+    """@positive-control(r2-worker-pool-progress-watchdog)
+    A fully occupied general pool with no completed handlers must exit 75 even
+    though the listener's reserved /health probe continues to return 200.
+    """
+    import threading as _threading
+    import heartwood.recall_service as recall_service
+
+    monkeypatch.setenv("HEARTWOOD_RECALL_DIAG_LOG", str(tmp_path / "pool-stall.diag.log"))
+    with tempfile.TemporaryDirectory() as temp_dir:
+        engine = RecallEngine(
+            db_path=Path(temp_dir) / "heartwood.db",
+            default_tenant="tenant:test",
+            dev_models=True,
+        )
+        server = recall_service.BoundedThreadingHTTPServer(
+            ("127.0.0.1", 0), recall_service.build_handler(engine), max_workers=2
+        )
+        port = server.server_port
+        _threading.Thread(target=server.serve_forever, daemon=True).start()
+        engine._lock.acquire()
+
+        def stalled_recall(index: int) -> None:
+            try:
+                request.urlopen(
+                    request.Request(
+                        f"http://127.0.0.1:{port}/recall",
+                        data=json.dumps({"query": f"q{index}", "tenant": "tenant:test"}).encode(),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    ),
+                    timeout=10,
+                )
+            except Exception:
+                pass
+
+        busy_threads = [
+            _threading.Thread(target=stalled_recall, args=(index,), daemon=True)
+            for index in range(2)
+        ]
+        for busy_thread in busy_threads:
+            busy_thread.start()
+
+        deadline = time.monotonic() + 3.0
+        while server.active_handler_count < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert server.active_handler_count == 2, "fixture did not saturate the general worker pool"
+
+        exit_calls: list[int] = []
+        stop_event = _threading.Event()
+
+        def fake_exit(code: int) -> None:
+            exit_calls.append(code)
+            stop_event.set()
+
+        original_exit = recall_service.os._exit  # type: ignore[attr-defined]
+        recall_service.os._exit = fake_exit  # type: ignore[attr-defined]
+        try:
+            recall_service._start_listener_watchdog(
+                port=port,
+                tls=False,
+                interval_s=0.05,
+                fail_threshold=2,
+                fail_window_s=1.0,
+                stop_event=stop_event,
+                server=server,
+            )
+            deadline = time.monotonic() + 5.0
+            while not exit_calls and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert exit_calls == [75], f"wedged general pool did not trigger exit 75: {exit_calls}"
+        finally:
+            recall_service.os._exit = original_exit  # type: ignore[attr-defined]
+            stop_event.set()
+            engine._lock.release()
+            for busy_thread in busy_threads:
+                busy_thread.join(timeout=5)
+            server.shutdown()
+
+
+def test_r2_saturated_but_progressing_pool_survives_watchdog():
+    """A fully occupied pool that completes work between probes must survive."""
+    import threading as _threading
+    from http.server import BaseHTTPRequestHandler
+    import heartwood.recall_service as recall_service
+
+    class HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = b'{"ok":true}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args):  # noqa: A002
+            return
+
+    class ProgressingPoolView:
+        completed = 0
+
+        @property
+        def general_worker_snapshot(self) -> tuple[int, int, int]:
+            self.completed += 1
+            return (2, 2, self.completed)
+
+    health_server = recall_service.BoundedThreadingHTTPServer(
+        ("127.0.0.1", 0), HealthHandler, max_workers=1
+    )
+    port = health_server.server_port
+    _threading.Thread(target=health_server.serve_forever, daemon=True).start()
+    stop_event = _threading.Event()
+    exit_calls: list[int] = []
+
+    def fake_exit(code: int) -> None:
+        exit_calls.append(code)
+        stop_event.set()
+
+    original_exit = recall_service.os._exit  # type: ignore[attr-defined]
+    recall_service.os._exit = fake_exit  # type: ignore[attr-defined]
+    try:
+        recall_service._start_listener_watchdog(
+            port=port,
+            tls=False,
+            interval_s=0.05,
+            fail_threshold=2,
+            fail_window_s=1.0,
+            stop_event=stop_event,
+            server=ProgressingPoolView(),  # type: ignore[arg-type]
+        )
+        time.sleep(0.35)
+        assert not exit_calls, f"progressing saturated pool was killed: {exit_calls}"
+    finally:
+        recall_service.os._exit = original_exit  # type: ignore[attr-defined]
+        stop_event.set()
+        health_server.shutdown()
+
+
+def test_r2_reserved_capacity_handles_operator_and_probe_concurrently():
+    """@positive-control(r2-probe-capacity-reserved)
+    One saturated general worker plus one slow loopback diagnostic must still
+    leave a second reserved loopback slot for the watchdog health request.
+    """
+    import threading as _threading
+    from http.server import BaseHTTPRequestHandler
+    import heartwood.recall_service as recall_service
+
+    general_entered = _threading.Event()
+    general_release = _threading.Event()
+    operator_entered = _threading.Event()
+    operator_release = _threading.Event()
+
+    class BlockingHandler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            if self.path == "/work":
+                general_entered.set()
+                general_release.wait(timeout=5)
+            elif self.path == "/local/readiness":
+                operator_entered.set()
+                operator_release.wait(timeout=5)
+            body = b'{"ok":true}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args):  # noqa: A002
+            return
+
+    server = recall_service.BoundedThreadingHTTPServer(
+        ("127.0.0.1", 0), BlockingHandler, max_workers=1
+    )
+    port = server.server_port
+    _threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    def fetch(path: str) -> None:
+        with request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5) as response:
+            assert json.loads(response.read().decode())["ok"] is True
+
+    general_thread = _threading.Thread(target=fetch, args=("/work",), daemon=True)
+    operator_thread = _threading.Thread(
+        target=fetch, args=("/local/readiness",), daemon=True
+    )
+    try:
+        general_thread.start()
+        assert general_entered.wait(timeout=2), "general worker did not saturate"
+        operator_thread.start()
+        assert operator_entered.wait(timeout=2), "operator did not occupy reserved capacity"
+        with request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1) as response:
+            assert json.loads(response.read().decode())["ok"] is True
+    finally:
+        general_release.set()
+        operator_release.set()
+        general_thread.join(timeout=5)
+        operator_thread.join(timeout=5)
+        server.shutdown()
+
+
+def test_r3_expected_connection_error_is_sanitized(capsys):
+    """Expected pre-auth TLS errors must not disclose peer IPs or tracebacks."""
+    import ssl
+    from http.server import BaseHTTPRequestHandler
+    import heartwood.recall_service as recall_service
+
+    server = recall_service.BoundedThreadingHTTPServer(
+        ("127.0.0.1", 0), BaseHTTPRequestHandler, max_workers=1
+    )
+    try:
+        try:
+            raise ssl.SSLEOFError(8, "attacker-controlled-detail")
+        except ssl.SSLError:
+            server.handle_error(object(), ("203.0.113.42", 45678))
+    finally:
+        server.server_close()
+    stderr = capsys.readouterr().err
+    assert "hw-recall connection closed category=tls" in stderr
+    assert "Traceback" not in stderr
+    assert "203.0.113.42" not in stderr
+    assert "attacker-controlled-detail" not in stderr
+
+
+def test_r1_r2_zero_timing_env_values_fall_back(monkeypatch):
+    """@positive-control(r1-connection-positive-timeout)
+    @positive-control(r2-watchdog-positive-timing)
+    Zero must never enable non-blocking I/O or a watchdog hot loop/inert window.
+    """
+    import heartwood.recall_service as recall_service
+
+    monkeypatch.setenv("HEARTWOOD_RECALL_CONNECTION_TIMEOUT_S", "0")
+    monkeypatch.setenv("HEARTWOOD_RECALL_LISTENER_PROBE_INTERVAL_S", "0")
+    monkeypatch.setenv("HEARTWOOD_RECALL_LISTENER_FAIL_WINDOW_S", "0")
+    assert recall_service._connection_timeout_s() == recall_service._DEFAULT_CONNECTION_TIMEOUT_S
+    assert recall_service._listener_probe_interval_s() == recall_service._DEFAULT_LISTENER_PROBE_INTERVAL_S
+    assert recall_service._listener_fail_window_s() == recall_service._DEFAULT_LISTENER_FAIL_WINDOW_S
+
+
+def test_r2_watchdog_rejects_unreachable_threshold_ratio():
+    """@positive-control(r2-watchdog-config-ratio)
+    Startup must reject an interval/window ratio that can never reach threshold.
+    """
+    import threading as _threading
+    import heartwood.recall_service as recall_service
+
+    with pytest.raises(ValueError, match="cannot reach its failure threshold"):
+        recall_service._start_listener_watchdog(
+            port=9,
+            tls=False,
+            interval_s=0.5,
+            fail_threshold=3,
+            fail_window_s=0.9,
+            stop_event=_threading.Event(),
+        )
+
+
+def test_r2_watchdog_config_is_validated_before_success_banner(
+    tmp_path, monkeypatch, capsys
+):
+    """Invalid watchdog config must fail before DB open, bind, or success output."""
+    import heartwood.recall_service as recall_service
+
+    monkeypatch.setenv("HEARTWOOD_RECALL_WATCHDOG", "0")
+    monkeypatch.setenv("HEARTWOOD_RECALL_LISTENER_WATCHDOG", "1")
+    monkeypatch.setenv("HEARTWOOD_RECALL_LISTENER_PROBE_INTERVAL_S", "1")
+    monkeypatch.setenv("HEARTWOOD_RECALL_LISTENER_FAIL_THRESHOLD", "3")
+    monkeypatch.setenv("HEARTWOOD_RECALL_LISTENER_FAIL_WINDOW_S", "1")
+    with pytest.raises(ValueError, match="cannot reach its failure threshold"):
+        recall_service.serve_recall(
+            db_path=tmp_path / "must-not-open.db",
+            dev_models=True,
+            warm_on_start=False,
+        )
+    assert capsys.readouterr().out == ""
+    assert not (tmp_path / "must-not-open.db").exists()
+
+
+def test_r2_watchdog_exits_on_stall():
+    """@positive-control(r2-watchdog-exits)
+    The listener watchdog must call os._exit(75) after fail_threshold consecutive
+    probe failures within fail_window_s.  This test monkeypatches the probe to
+    always fail and verifies _exit fires — proving the guard FIRES on bad input.
+    """
+    import threading as _threading
+    import heartwood.recall_service as recall_service
+
+    exit_calls: list[int] = []
+    stop_event = _threading.Event()
+
+    def fake_exit(code: int) -> None:
+        exit_calls.append(code)
+        stop_event.set()  # halt the watchdog loop so it doesn't outlive the test
+
+    original_exit = recall_service.os._exit  # type: ignore[attr-defined]
+    recall_service.os._exit = fake_exit  # type: ignore[attr-defined]
+    try:
+        # @positive-control(r2-watchdog-exits): a closed port must reach os._exit(75).
+        recall_service._start_listener_watchdog(
+            port=9,  # port 9 is always closed — probes always fail
+            tls=False,
+            interval_s=0.05,
+            fail_threshold=2,
+            fail_window_s=1.0,
+            stop_event=stop_event,
+        )
+        deadline = time.monotonic() + 5.0
+        while not exit_calls and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert exit_calls, "watchdog never called os._exit — guard does not fire on sustained failure"
+        assert exit_calls[0] == 75, f"expected exit code 75, got {exit_calls[0]}"
+    finally:
+        recall_service.os._exit = original_exit  # type: ignore[attr-defined]
+        stop_event.set()  # ensure the watchdog thread exits if the assertion failed
 
 
 def main():
