@@ -69,6 +69,7 @@ _MALLOC_TRIM_LOOKED_UP = False
 
 # R1: connection-level hardening
 _DEFAULT_CONNECTION_TIMEOUT_S = 30.0
+_DEFAULT_TLS_HANDSHAKE_TIMEOUT_S = 5.0
 _DEFAULT_MAX_REQUEST_BODY_BYTES = 256 * 1024  # 256 KB
 _DEFAULT_MAX_CONCURRENT_HANDLERS = 4
 
@@ -953,6 +954,7 @@ class BoundedThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     ) -> None:
         super().__init__(server_address, RequestHandlerClass)
         self._worker_sem = threading.BoundedSemaphore(max(1, max_workers))
+        self._probe_sem = threading.BoundedSemaphore(1)
         self._active_handler_count = 0
         self._active_handler_lock = threading.Lock()
 
@@ -962,21 +964,30 @@ class BoundedThreadingHTTPServer(ThreadingMixIn, HTTPServer):
             return self._active_handler_count
 
     def process_request(self, request: object, client_address: object) -> None:
-        if not self._worker_sem.acquire(blocking=False):
-            try:
-                request.close()  # type: ignore[union-attr]
-            except Exception:
-                pass
-            return
+        # @fail-closed(r1-threading-unblocks-health)
+        worker_sem = self._worker_sem
+        if not worker_sem.acquire(blocking=False):
+            # @fail-closed(r2-probe-capacity-reserved)
+            is_loopback = _is_loopback_address(str(client_address[0]))  # type: ignore[index]
+            if is_loopback and self._probe_sem.acquire(blocking=False):
+                worker_sem = self._probe_sem
+            else:
+                self.shutdown_request(request)
+                return
         t = threading.Thread(
             target=self._dispatch_request,
-            args=(request, client_address),
+            args=(request, client_address, worker_sem),
             daemon=True,
             name="hw-recall-handler",
         )
         t.start()
 
-    def _dispatch_request(self, request: object, client_address: object) -> None:
+    def _dispatch_request(
+        self,
+        request: object,
+        client_address: object,
+        worker_sem: threading.BoundedSemaphore,
+    ) -> None:
         with self._active_handler_lock:
             self._active_handler_count += 1
         try:
@@ -987,7 +998,7 @@ class BoundedThreadingHTTPServer(ThreadingMixIn, HTTPServer):
             with self._active_handler_lock:
                 self._active_handler_count -= 1
             self.shutdown_request(request)
-            self._worker_sem.release()
+            worker_sem.release()
 
 
 def build_handler(
@@ -1003,14 +1014,21 @@ def build_handler(
     )
     rate_limiter = RecallRateLimiter()
     conn_timeout = _connection_timeout_s()
+    tls_handshake_timeout = _tls_handshake_timeout_s()
     max_body = _max_request_body_bytes()
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "HeartwoodRecall/0.1"
-        # R1: per-connection socket timeout covers TLS handshake, header read,
-        # and body read.  Applied by BaseHTTPRequestHandler.setup() via
-        # self.connection.settimeout(self.timeout).
+        # R1: after an explicit bounded TLS handshake on the worker, this
+        # timeout covers header and body reads.
         timeout = conn_timeout
+
+        def setup(self) -> None:
+            if isinstance(self.request, ssl.SSLSocket):
+                # @fail-closed(r1-tls-handshake-deadline)
+                self.request.settimeout(tls_handshake_timeout)
+                self.request.do_handshake()
+            super().setup()
 
         def log_message(self, format: str, *args):  # noqa: A002
             # Suppress the default Common Log Format line (contains raw path).
@@ -1167,11 +1185,17 @@ def build_handler(
             return _is_loopback_address(str(self.client_address[0]))
 
         def _read_json(self, max_bytes: int) -> dict[str, Any]:
-            # R1: enforce body size cap before reading; treat absent/zero Content-Length as empty body.
-            raw_len = int(self.headers.get("Content-Length") or 0)
-            if raw_len > max_bytes:
+            # Treat absent/zero Content-Length as empty. Chunked bodies fail
+            # closed as empty because this service does not decode them.
+            raw_content_length = self.headers.get("Content-Length")
+            try:
+                raw_len = int(raw_content_length or 0)
+            except (TypeError, ValueError) as exc:
+                raise RequestBodyTooLargeError("invalid Content-Length") from exc
+            # @fail-closed(r1-body-size-cap)
+            if raw_len < 0 or raw_len > max_bytes:
                 raise RequestBodyTooLargeError(
-                    f"request body too large: Content-Length {raw_len} exceeds limit {max_bytes}"
+                    f"request body rejected: Content-Length {raw_len} is outside 0..{max_bytes}"
                 )
             raw = self.rfile.read(raw_len) if raw_len else b"{}"
             return json.loads(raw.decode("utf-8") or "{}")
@@ -1236,7 +1260,12 @@ def serve_recall(
                 raise ValueError("TLS requires both tls_cert_file and tls_key_file")
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.load_cert_chain(str(tls_cert_file), str(tls_key_file))
-            server.socket = context.wrap_socket(server.socket, server_side=True)
+            server.socket = context.wrap_socket(
+                server.socket,
+                server_side=True,
+                # @fail-closed(r1-tls-handshake-off-accept-loop)
+                do_handshake_on_connect=False,
+            )
         scheme = "https" if tls_enabled else "http"
         print(
             json.dumps(
@@ -1321,6 +1350,14 @@ def _nonnegative_float_env(name: str, default: float) -> float:
     except (TypeError, ValueError):
         return default
     return value if value >= 0 else default
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
 
 
 def _positive_int_env(name: str, default: int) -> int:
@@ -1843,7 +1880,15 @@ def _malloc_trim():
 
 
 def _connection_timeout_s() -> float:
-    return _nonnegative_float_env("HEARTWOOD_RECALL_CONNECTION_TIMEOUT_S", _DEFAULT_CONNECTION_TIMEOUT_S)
+    # @fail-closed(r1-connection-positive-timeout)
+    return _positive_float_env("HEARTWOOD_RECALL_CONNECTION_TIMEOUT_S", _DEFAULT_CONNECTION_TIMEOUT_S)
+
+
+def _tls_handshake_timeout_s() -> float:
+    return _positive_float_env(
+        "HEARTWOOD_RECALL_TLS_HANDSHAKE_TIMEOUT_S",
+        _DEFAULT_TLS_HANDSHAKE_TIMEOUT_S,
+    )
 
 
 def _max_request_body_bytes() -> int:
@@ -1855,7 +1900,8 @@ def _max_concurrent_handlers() -> int:
 
 
 def _listener_probe_interval_s() -> float:
-    return _nonnegative_float_env("HEARTWOOD_RECALL_LISTENER_PROBE_INTERVAL_S", _DEFAULT_LISTENER_PROBE_INTERVAL_S)
+    # @fail-closed(r2-watchdog-positive-timing)
+    return _positive_float_env("HEARTWOOD_RECALL_LISTENER_PROBE_INTERVAL_S", _DEFAULT_LISTENER_PROBE_INTERVAL_S)
 
 
 def _listener_fail_threshold() -> int:
@@ -1863,7 +1909,25 @@ def _listener_fail_threshold() -> int:
 
 
 def _listener_fail_window_s() -> float:
-    return _nonnegative_float_env("HEARTWOOD_RECALL_LISTENER_FAIL_WINDOW_S", _DEFAULT_LISTENER_FAIL_WINDOW_S)
+    return _positive_float_env("HEARTWOOD_RECALL_LISTENER_FAIL_WINDOW_S", _DEFAULT_LISTENER_FAIL_WINDOW_S)
+
+
+def _validate_listener_watchdog_config(
+    *,
+    interval_s: float,
+    fail_threshold: int,
+    fail_window_s: float,
+) -> None:
+    # @fail-closed(r2-watchdog-config-ratio)
+    if interval_s <= 0 or fail_threshold <= 0 or fail_window_s <= 0:
+        raise ValueError("listener watchdog timings and threshold must be positive")
+    required_failure_span_s = interval_s * (fail_threshold - 1)
+    if required_failure_span_s > fail_window_s:
+        raise ValueError(
+            "listener watchdog cannot reach its failure threshold within the configured window: "
+            f"interval_s={interval_s:g}, fail_threshold={fail_threshold}, "
+            f"fail_window_s={fail_window_s:g}"
+        )
 
 
 def _next_request_id() -> str:
@@ -1977,18 +2041,22 @@ def _start_listener_watchdog(
     The watchdog probes ``/health`` on the loopback address every ``interval_s``
     seconds.  If ``fail_threshold`` consecutive failures occur within
     ``fail_window_s`` seconds, it emits a sanitized diagnostic snapshot and
-    calls ``os._exit(75)`` so Fly's ``restart=always`` replaces the process.
+    calls ``os._exit(75)`` so an external process supervisor replaces it.
 
     The watchdog is independent of the serving thread.  With the bounded
-    threading server (R1), ``/health`` is handled by a worker thread and is not
-    blocked by a stalled recall operation.  If all worker slots are occupied,
-    the probe connection is closed immediately, which the watchdog counts as a
-    failure — signalling an overloaded or stalled pool.
+    threading server (R1), loopback probes have one reserved overflow slot.
+    Pool saturation therefore remains an overload signal without being
+    misclassified as listener starvation.
 
     Set ``HEARTWOOD_RECALL_LISTENER_WATCHDOG=0`` to disable.
     """
     if os.environ.get("HEARTWOOD_RECALL_LISTENER_WATCHDOG", "1") in {"0", "false", "False"}:
         return
+    _validate_listener_watchdog_config(
+        interval_s=interval_s,
+        fail_threshold=fail_threshold,
+        fail_window_s=fail_window_s,
+    )
 
     scheme = "https" if tls else "http"
     probe_url = f"{scheme}://127.0.0.1:{port}/health"
@@ -2057,6 +2125,7 @@ def _start_listener_watchdog(
                         file=sys.stderr,
                         flush=True,
                     )
+                    # @fail-closed(r2-watchdog-exits)
                     os._exit(75)
 
             time.sleep(interval_s)
