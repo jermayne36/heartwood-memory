@@ -30,7 +30,7 @@ def test_package_and_runtime_versions_match():
         ROOT / "pyproject.toml",
         ROOT / "heartwood" / "__init__.py",
         ROOT / "server.json",
-    ) == "0.2.6"
+    ) == "0.2.7"
 
 
 def test_package_metadata_links_public_source():

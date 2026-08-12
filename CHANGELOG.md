@@ -4,6 +4,24 @@ All notable changes to `heartwood-memory` are documented here.
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-08-11
+
+### Fixed
+- The recall gateway now dispatches requests through a bounded worker pool, so
+  a stalled recall no longer blocks the listener or the lock-free health path.
+  Progress-aware watchdog telemetry detects a genuinely wedged pool without
+  restarting a saturated server that is still completing work.
+- TLS handshakes now run on workers behind a bounded deadline instead of on the
+  accept loop. Expected handshake, timeout, and disconnect failures emit fixed,
+  sanitized categories without tracebacks or client addresses.
+- Recall request bodies reject invalid, negative, and oversized
+  `Content-Length` values before reading, closing the unbounded read-to-EOF
+  path found during review.
+- Reserved operator capacity keeps health probes available during general-pool
+  saturation, and watchdog configuration is validated before database or
+  listener startup. The listener, TLS, body-limit, and watchdog controls now
+  have mutation-discriminating positive controls.
+
 ## [0.2.6] - 2026-08-10
 
 ### Fixed
