@@ -393,7 +393,49 @@ PY
 )
 ```
 
-## 6. Repin the production consumer
+## 6. Publish the Official MCP Registry metadata
+
+After the PyPI release is verified, validate and publish the matching
+`server.json` through the official MCP Registry. Each release version is a new,
+immutable registry record, so confirm that `server.json` still names the same
+version as the package before publishing. Use the existing authenticated
+publisher session; do not create, replace, or rotate credentials as part of a
+release.
+
+```bash
+python3.11 scripts/check_version.py
+mcp-publisher validate server.json
+mcp-publisher publish server.json
+```
+
+Expected final shape:
+
+```text
+✓ Successfully published
+✓ Server io.github.jermayne36/heartwood-memory version X.Y.Z
+```
+
+Verify the new version and its public metadata with a fresh registry fetch:
+
+```bash
+curl -fsS \
+  'https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.jermayne36%2Fheartwood-memory' |
+  jq --arg version "$RELEASE_VERSION" '
+    [.servers[].server]
+    | map(select(
+        .name == "io.github.jermayne36/heartwood-memory"
+        and .version == $version
+      ))
+    | first
+    | {name, title, description, version}
+  '
+```
+
+An empty result, validation failure, publish failure, or version mismatch is a
+stop condition. Do not republish the same version with altered metadata; prepare
+a higher package version through this runbook instead.
+
+## 7. Repin the production consumer
 
 Publishing does not update the EdukasAI recall daemon. Continue in the private
 team workspace at `docs/runbooks/heartwood.md`, then run the sanctioned

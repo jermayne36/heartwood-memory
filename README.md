@@ -1,4 +1,4 @@
-# Heartwood Memory
+# Heartwood Memory — governed memory for AI agents
 
 <!-- mcp-name: io.github.jermayne36/heartwood-memory -->
 
