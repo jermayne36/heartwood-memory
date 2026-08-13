@@ -398,15 +398,21 @@ PY
 After the PyPI release is verified, validate and publish the matching
 `server.json` through the official MCP Registry. Each release version is a new,
 immutable registry record, so confirm that `server.json` still names the same
-version as the package before publishing. Use the existing authenticated
-publisher session; do not create, replace, or rotate credentials as part of a
-release.
+version as the package before publishing. The default-branch
+`publish-mcp.yml` workflow validates the manifest, authenticates with GitHub
+Actions OIDC, and publishes without a stored repository secret. Obtain explicit
+release/publish approval before dispatching it; do not use interactive login or
+create, replace, or rotate credentials as part of a release.
 
 ```bash
 python3.11 scripts/check_version.py
-mcp-publisher validate server.json
-mcp-publisher publish server.json
+gh workflow run publish-mcp.yml --ref main
+gh run list --workflow publish-mcp.yml --limit 1
 ```
+
+Open the run URL returned by `gh run list` and confirm that both
+`mcp-publisher validate server.json` and `mcp-publisher publish server.json`
+succeeded before performing the registry fetch below.
 
 Expected final shape:
 
