@@ -9,13 +9,19 @@ concurrency:
 
 jobs:
   publish:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - name: Install mcp-publisher
         env:
@@ -25,9 +31,20 @@ jobs:
           curl --fail --location --show-error --silent \
             "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz" \
             --output mcp-publisher.tar.gz
+
+          # @positive-control(mcp-publisher-asset-pin)
+          if printf '%064d  %s\n' 0 mcp-publisher.tar.gz | sha256sum --check -- >/dev/null 2>&1; then
+            echo "mcp-publisher asset-pin positive control did not fire" >&2
+            exit 1
+          fi
+
+          # @fail-closed(mcp-publisher-asset-pin)
           printf '%s  %s\n' "$MCP_PUBLISHER_SHA256" mcp-publisher.tar.gz | sha256sum --check --
           tar --extract --gzip --file mcp-publisher.tar.gz mcp-publisher
-          ./mcp-publisher --version
+          ./mcp-publisher --version 2>&1 | grep --fixed-strings 'mcp-publisher 1.8.1'
+
+      - name: Verify release version consistency
+        run: python3 scripts/check_version.py
 
       - name: Validate server metadata
         run: ./mcp-publisher validate server.json
