@@ -4,7 +4,7 @@
 
 **Heartwood Memory is a governed memory store for AI agents: provenance-signed
 audit, policy-gated recall, tenant isolation, and a per-subject key-destruction
-proof on erasure.**
+receipt at erasure initiation.**
 
 > **License at a glance.** Heartwood Memory 0.2.0 and later is
 > source-available under the [Business Source License 1.1](LICENSE) (BSL 1.1),
