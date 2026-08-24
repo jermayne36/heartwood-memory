@@ -10,6 +10,7 @@ import base64
 import json
 import os
 import re
+import secrets
 import time
 from collections import Counter, OrderedDict
 from datetime import datetime, timezone
@@ -28,9 +29,21 @@ from .key_lifecycle import (
     rewrap_tenant_keys,
     rotate_tenant_root,
 )
+from .key_custody import is_wrapped_key
 from .metadata import normalize_substrate_metadata
 from .policy import Principal, PolicyEnforcer
 from .provenance import Signer, chain, verify_meta
+from .receipts import (
+    ERASURE_SCHEMA,
+    RECALL_SCHEMA,
+    canonical_bytes,
+    finalize_receipt,
+    principal_key_entries,
+    producer_signature_parts,
+    public_key_fingerprint,
+    sha256_prefixed,
+    signing_block,
+)
 from .retrieval import (
     bm25_scores_prepared,
     fuse_rerank,
@@ -70,6 +83,8 @@ def _positive_int_env(name: str, default: int) -> int:
 
 _TEXT_CACHE_LIMIT = _positive_int_env("HEARTWOOD_TEXT_CACHE_LIMIT", 8192)
 _BM25_CORPUS_CACHE_LIMIT = _positive_int_env("HEARTWOOD_BM25_CORPUS_CACHE_LIMIT", 16)
+_RECEIPT_CACHE_LIMIT = _positive_int_env("HEARTWOOD_RECEIPT_CACHE_LIMIT", 2000)
+_RECEIPT_CACHE_TTL_SECONDS = _positive_int_env("HEARTWOOD_RECEIPT_CACHE_TTL_SECONDS", 900)
 _MIRROR_FAMILY_SOURCE = re.compile(
     r"^markdown://(?P<root>memory|team-memory|team_memory)/(?P<name>.+)$",
     re.IGNORECASE,
@@ -95,6 +110,13 @@ def _gen_id(prefix="mem"):
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _producer_key_fingerprint(signature: str | None) -> str | None:
+    try:
+        return public_key_fingerprint(producer_signature_parts(signature)[0])
+    except Exception:
+        return None
 
 
 def _review_badge(review_state: str | None) -> str | None:
@@ -197,6 +219,7 @@ class Heartwood:
         self._text_cache: OrderedDict[str, tuple[str, str]] = OrderedDict()
         self._token_cache: OrderedDict[str, tuple[str, tuple[str, ...]]] = OrderedDict()
         self._bm25_corpus_cache: OrderedDict[tuple[str, ...], dict] = OrderedDict()
+        self._receipt_cache: OrderedDict[tuple[str, str, str], tuple[float, dict]] = OrderedDict()
 
     # -- public ergonomics ---------------------------------------------- #
     def with_tenant(self, tenant: str):
@@ -816,6 +839,15 @@ class Heartwood:
             result = {
                 "id": mem_id, "content": content, "score": round(score, 4),
                 "epistemic": meta["epistemic"], "confidence": meta["confidence"],
+                "content_hash": meta["content_hash"],
+                "created_by": meta["created_by"],
+                "source_uri": meta.get("source", {}).get("uri"),
+                "producer_sig": meta["producer_sig"],
+                "producer_key_fingerprint": _producer_key_fingerprint(
+                    meta.get("producer_sig")
+                ),
+                "signature_valid_at_serve": content_signature_valid,
+                "content_hash_match_at_serve": content_hash_match,
                 "kind": meta["kind"], "truth_status": meta["truth_status"],
                 "classification": meta["classification"], "policy_scope": meta["policy_scope"],
                 "review_state": meta["review_state"],
@@ -877,25 +909,109 @@ class Heartwood:
         }
         if len(self._explain) > 2000:
             self._explain.popitem(last=False)
-        self.audit.append(
-            self.tenant,
-            principal.id,
-            "recall",
-            recall_id,
-            {
-                "visible": len(visible),
-                "denied": len(denied),
-                "returned": len(results),
+        receipt = None
+        receipt_unavailable_reason = None
+        if self._anchor_writer is None:
+            self.audit.append(
+                self.tenant, principal.id, "recall", recall_id,
+                {
+                    "visible": len(visible), "denied": len(denied),
+                    "returned": len(results), "strict_mode": self._strict_mode.value,
+                    "strict_dropped": len(strict_failures),
+                    "strict_reason_buckets": strict_reason_buckets,
+                    "strict_exempt": len(strict_exempt_ids),
+                },
+            )
+            receipt_unavailable_reason = "no_durable_signing_root"
+        else:
+            receipt_results = [
+                {
+                    "id": item["id"], "content_hash": item["content_hash"],
+                    "epistemic": item["epistemic"], "created_by": item["created_by"],
+                    "source_uri": item["source_uri"],
+                    "source_ids": list(item["source_ids"]),
+                    "producer_sig": item["producer_sig"],
+                    "producer_key_fingerprint": item["producer_key_fingerprint"],
+                    "signature_valid_at_serve": item["signature_valid_at_serve"],
+                    "content_hash_match_at_serve": item["content_hash_match_at_serve"],
+                }
+                for item in results
+            ]
+            policy_receipt = {
                 "strict_mode": self._strict_mode.value,
-                "strict_dropped": len(strict_failures),
-                "strict_reason_buckets": strict_reason_buckets,
-                "strict_exempt": len(strict_exempt_ids),
-            },
-        )
-        return {"recall_id": recall_id, "results": results, "index_lag": lag}
+                "visible": len(visible),
+                "denied_count": len(denied),
+                "returned": len(results),
+            }
+            issued_at = _utc_now_iso()
+            receipt_id = "rr_" + secrets.token_hex(12)
+            holder = {}
+
+            def detail_builder(seq):
+                commitment = {
+                    "schema": RECALL_SCHEMA, "receipt_id": receipt_id,
+                    "recall_id": recall_id, "tenant": self.tenant,
+                    "principal_id": principal.id, "issued_at_utc": issued_at,
+                    "query_hash": sha256_prefixed(canonical_bytes({"cue": cue})),
+                    "chain_id": self.store.chain_id(), "audit_seq": seq,
+                    "policy": policy_receipt, "results": receipt_results,
+                    "principal_keys": principal_key_entries(
+                        self.store, self.tenant,
+                        (item["created_by"] for item in receipt_results),
+                    ),
+                    "signing": signing_block(self._anchor_writer),
+                }
+                holder["commitment"] = commitment
+                return {
+                    "receipt_hash": sha256_prefixed(canonical_bytes(commitment)),
+                    "result_count": len(receipt_results),
+                    "strict_mode": policy_receipt["strict_mode"],
+                    "visible": policy_receipt["visible"],
+                    "denied": policy_receipt["denied_count"],
+                    "returned": policy_receipt["returned"],
+                }
+
+            try:
+                transition = self.audit.append_bound(
+                    self.tenant, principal.id, "recall", recall_id, detail_builder,
+                )
+                receipt = finalize_receipt(
+                    holder["commitment"], audit_row_hash=transition["row_hash"],
+                    anchor_writer=self._anchor_writer, kind="recall",
+                )
+                self._cache_receipt(principal.id, recall_id, receipt)
+            except Exception:
+                # @fail-closed(recall-receipt-signing)
+                receipt = None
+                receipt_unavailable_reason = "receipt_signing_failed"
+        return {
+            "recall_id": recall_id, "results": results, "index_lag": lag,
+            "receipt": receipt,
+            "receipt_unavailable_reason": receipt_unavailable_reason,
+        }
 
     def explain_recall(self, recall_id: str) -> dict:
         return self._explain.get(recall_id, {"error": "unknown recall_id"})
+
+    def _cache_receipt(self, principal_id: str, recall_id: str, receipt: dict) -> None:
+        key = (self.tenant, principal_id, recall_id)
+        self._receipt_cache[key] = (time.monotonic() + _RECEIPT_CACHE_TTL_SECONDS, receipt)
+        self._receipt_cache.move_to_end(key)
+        while len(self._receipt_cache) > _RECEIPT_CACHE_LIMIT:
+            self._receipt_cache.popitem(last=False)
+
+    def recall_receipt(self, principal_id: str, recall_id: str) -> dict | None:
+        """Return an authenticated principal's cached receipt, or a uniform miss."""
+        key = (self.tenant, principal_id, recall_id)
+        cached = self._receipt_cache.get(key)
+        if cached is None:
+            return None
+        expires_at, receipt = cached
+        if expires_at <= time.monotonic():
+            self._receipt_cache.pop(key, None)
+            return None
+        self._receipt_cache.move_to_end(key)
+        return receipt
 
     def _graph_paths(self, result_ids: list[str]) -> list[dict]:
         if len(result_ids) < 2:
@@ -1251,44 +1367,139 @@ class Heartwood:
         }
 
     def forget(self, subject, *, mode="hard", actor="system", reason="", legal_basis=""):
-        purged = 0
         hard = mode == "hard"
+        if not hard:
+            self.audit.append(
+                self.tenant, actor, "forget", subject,
+                {"mode": mode, "purged": 0, "cascade": 0},
+            )
+            return {
+                "subject": subject, "mode": mode, "purged": 0, "cascade": 0,
+                "key_shredded": False, "reason": reason, "legal_basis": legal_basis,
+                "erasure_initiated_at": None, "key_shred_requested": False,
+                "purge_requested": False, "custody_backend": self.keys.custodian.name,
+                "custody_retention_floor_seconds": self.keys.custodian.retention_floor_seconds,
+                "receipt": None, "proof_status": "UNAVAILABLE",
+                "receipt_unavailable_reason": "hard_erasure_required",
+            }
         erasure_mechanism = {
-            "erasure_initiated_at": _utc_now_iso() if hard else None,
-            "key_shred_requested": hard,
-            "purge_requested": hard,
+            "erasure_initiated_at": _utc_now_iso(),
+            "key_shred_requested": True,
+            "purge_requested": True,
             "custody_backend": self.keys.custodian.name,
             "custody_retention_floor_seconds": self.keys.custodian.retention_floor_seconds,
         }
-        if hard:
-            self.keys.shred(self.tenant, subject)        # crypto-shred (key destruction)
-            envelope, key_state = self.store.get_key(self.tenant, subject)
-            # @fail-closed(erasure-mechanism-t0)
-            if envelope is not None or key_state not in (None, "shredded"):
-                raise RuntimeError(
-                    "hard erasure did not make the subject key unusable"
-                )
-            seed = sorted(set(self.store.subject_ids(self.tenant, subject))
-                          | set(self.store.lineage_memory_ids(self.tenant, subject)))
-            cascade = self.store.descendants(seed)       # deletion-lineage: derived artifacts too
-            to_purge = set(seed) | cascade
-            for m in to_purge:
-                self._text_cache.pop(m, None)
-                self._token_cache.pop(m, None)
-                self.store.delete_memory(m)
-                self.index.remove(m)
-            self._bm25_corpus_cache.clear()
-            purged = len(to_purge)
-            cascade_n = len(cascade)
-        self.audit.append(self.tenant, actor, "forget", subject,
-                          {"mode": mode, "purged": purged,
-                           "cascade": cascade_n if mode == "hard" else 0,
-                           "reason": reason, "legal_basis": legal_basis,
-                           **erasure_mechanism})
-        return {"subject": subject, "mode": mode, "purged": purged,
-                "cascade": cascade_n if mode == "hard" else 0,
-                "key_shredded": mode == "hard", "reason": reason,
-                "legal_basis": legal_basis, **erasure_mechanism}
+        operation_id = "erase_" + secrets.token_hex(12)
+        # Resolve the complete primary + secondary subject selector before the
+        # irreversible key shred.  The Store guard rejects malformed alias JSON.
+        seed = sorted(
+            set(self.store.subject_ids(self.tenant, subject))
+            | set(self.store.lineage_memory_ids(self.tenant, subject))
+        )
+        cascade = self.store.descendants(seed)
+        to_purge = sorted(set(seed) | cascade)
+        envelope_before, _state_before = self.store.get_key(self.tenant, subject)
+        wrapped_before = bool(envelope_before is not None and is_wrapped_key(envelope_before))
+
+        self.keys.shred(self.tenant, subject)
+        envelope, key_state = self.store.get_key(self.tenant, subject)
+        # @fail-closed(erasure-mechanism-t0)
+        if envelope is not None or key_state != "shredded":
+            raise RuntimeError(
+                "hard erasure did not make the subject key unusable: "
+                "a shredded key tombstone was not persisted"
+            )
+        for mem_id in to_purge:
+            self._text_cache.pop(mem_id, None)
+            self._token_cache.pop(mem_id, None)
+            self.store.delete_memory(mem_id)
+            self.index.remove(mem_id)
+        self.store.conn.execute(
+            "DELETE FROM deletion_lineage WHERE tenant=? AND subject=?",
+            (self.tenant, subject),
+        )
+        self.store.conn.commit()
+        self._bm25_corpus_cache.clear()
+        purged, cascade_n = len(to_purge), len(cascade)
+        response_payload = {
+            "subject": subject, "mode": "hard", "purged": purged,
+            "cascade": cascade_n, "key_shredded": True,
+            "reason": reason, "legal_basis": legal_basis,
+            **erasure_mechanism,
+        }
+        if self._anchor_writer is None:
+            # Sensitive reason/legal_basis remain outside logs and audit rows.
+            self.audit.append(
+                self.tenant, actor, "forget", subject,
+                {
+                    "purged_count": purged, "cascade_count": cascade_n,
+                    "key_state_after": key_state,
+                    "dek_present_after": envelope is not None,
+                },
+            )
+            return {
+                **response_payload, "receipt": None, "proof_status": "UNAVAILABLE",
+                "receipt_unavailable_reason": "no_durable_signing_root",
+            }
+
+        issued_at = _utc_now_iso()
+        receipt_id = "er_" + secrets.token_hex(12)
+        holder = {}
+
+        def detail_builder(seq):
+            commitment = {
+                "schema": ERASURE_SCHEMA, "receipt_id": receipt_id,
+                "tenant": self.tenant, "subject_id": subject, "actor": actor,
+                "issued_at_utc": issued_at, **erasure_mechanism,
+                "payload": response_payload,
+                "key": {
+                    "state_after": "shredded", "dek_present_after": False,
+                    "wrapped_before": wrapped_before,
+                },
+                "purge": {
+                    "purged_memory_ids": to_purge, "purged_count": purged,
+                    "cascade_count": cascade_n, "index_removed": True,
+                },
+                "chain_id": self.store.chain_id(), "audit_seq": seq,
+                "boundary": {
+                    "content_bytes_erased": False,
+                    "backups_and_snapshots": "outside receipt scope",
+                    "root_present_at_issue": True,
+                },
+                "signing": signing_block(self._anchor_writer),
+            }
+            holder["commitment"] = commitment
+            return {
+                "receipt_hash": sha256_prefixed(canonical_bytes(commitment)),
+                "purged_count": purged, "cascade_count": cascade_n,
+                "key_state_after": "shredded", "dek_present_after": False,
+            }
+
+        try:
+            transition = self.audit.append_bound(
+                self.tenant, actor, "forget", subject, detail_builder,
+            )
+            receipt = finalize_receipt(
+                holder["commitment"], audit_row_hash=transition["row_hash"],
+                anchor_writer=self._anchor_writer, kind="erasure",
+            )
+            return {
+                **response_payload, "receipt": receipt, "proof_status": "AVAILABLE",
+                "receipt_unavailable_reason": None,
+            }
+        except Exception as exc:
+            # @fail-closed(post-erasure-receipt-failure): no unsigned object is emitted.
+            self.store.record_receipt_failure(
+                operation_id=operation_id, tenant=self.tenant, subject=subject,
+                initiated_at_utc=erasure_mechanism["erasure_initiated_at"],
+                completed_at_utc=_utc_now_iso(), purge_completed=True,
+                key_state_after=key_state, failure_stage="audit_or_signing",
+                error_class=type(exc).__name__,
+            )
+            return {
+                **response_payload, "receipt": None, "proof_status": "UNAVAILABLE",
+                "receipt_unavailable_reason": "post_erasure_receipt_failure",
+            }
 
     # -- trusted internals (same-process adapters: e.g. memory-tool backend) --- #
     def read_content(self, mem_id: str) -> str | None:

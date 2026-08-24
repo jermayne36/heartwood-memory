@@ -31,6 +31,8 @@ _ANCHOR_DOMAIN = "heartwood.audit-anchor.v1"
 _MANIFEST_PIN_DOMAIN = "heartwood.strict-cutover-pin.v1"
 _ANCHOR_SIGNATURE_DOMAIN = b"heartwood.audit-anchor.signature.v1\x00"
 _MANIFEST_PIN_SIGNATURE_DOMAIN = b"heartwood.strict-cutover-pin.signature.v1\x00"
+_RECALL_RECEIPT_SIGNATURE_DOMAIN = b"heartwood.recall-receipt.v1\x00"
+_ERASURE_RECEIPT_SIGNATURE_DOMAIN = b"heartwood.erasure-receipt.v1\x00"
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _CHAIN_ID_RE = re.compile(r"^chain_[0-9a-f]{32}$")
 _ANCHOR_ID_RE = re.compile(r"^anc_[0-9a-f]{24}$")
@@ -187,6 +189,7 @@ class AnchorWriter:
         retry_backoff_s: float = 1.0,
         retry_backoff_max_s: float = 60.0,
         background_time_cadence: bool = False,
+        signing_key_epoch: int = 1,
     ):
         # @fail-closed(custodian-signing-capability): anchoring must refuse a
         # backend that cannot supply the durable signing capability.
@@ -199,6 +202,9 @@ class AnchorWriter:
         self.store = store
         self.sink = sink
         self.custodian = custodian
+        if not isinstance(signing_key_epoch, int) or isinstance(signing_key_epoch, bool) or signing_key_epoch <= 0:
+            raise AnchorConfigurationError("signing key epoch must be a positive integer")
+        self.signing_key_epoch = signing_key_epoch
         self.clock = clock
         self.interval_s = _positive_float(
             interval_s,
@@ -253,8 +259,30 @@ class AnchorWriter:
             "chain_id": self.chain_id,
             "sink_id": self.sink.sink_id,
             "signing_key_id": self.custodian.key_id,
+            "signing_key_epoch": self.signing_key_epoch,
             "verification_root_fingerprint": self.root_fingerprint,
         }
+
+    @property
+    def signing_public_key(self) -> bytes:
+        """Return the non-secret deployment signing public key."""
+        return bytes(self._public_key)
+
+    def sign_recall_receipt(self, canonical_signable: bytes) -> str:
+        """Sign only a canonical recall-receipt v1 payload."""
+        if not isinstance(canonical_signable, bytes):
+            raise TypeError("recall receipt signable must be bytes")
+        return _b64e(self._private_key.sign(
+            _RECALL_RECEIPT_SIGNATURE_DOMAIN + canonical_signable
+        ))
+
+    def sign_erasure_receipt(self, canonical_signable: bytes) -> str:
+        """Sign only a canonical erasure-receipt v1 payload."""
+        if not isinstance(canonical_signable, bytes):
+            raise TypeError("erasure receipt signable must be bytes")
+        return _b64e(self._private_key.sign(
+            _ERASURE_RECEIPT_SIGNATURE_DOMAIN + canonical_signable
+        ))
 
     def anchor(self) -> dict[str, Any]:
         """Persist, read back, verify, and match the current non-empty audit head."""
@@ -1010,11 +1038,8 @@ def _verify_signed_record(
 ) -> None:
     try:
         public_key = _b64d(record["signing_public_key"])
-        signature = _b64d(record["signature"])
     except Exception as exc:
         raise AnchorSinkError("anchor signing material is malformed") from exc
-    if len(public_key) != 32 or len(signature) != 64:
-        raise AnchorSinkError("anchor signing material has an invalid length")
     fingerprint = _fingerprint(public_key)
     if record["verification_root_fingerprint"] != fingerprint:
         raise AnchorSinkError("anchor verification-root fingerprint is inconsistent")
@@ -1022,11 +1047,29 @@ def _verify_signed_record(
         raise AnchorSinkError("anchor verification root is not externally pinned")
     if not isinstance(record["signing_key_id"], str) or not record["signing_key_id"]:
         raise AnchorSinkError("anchor signing key id is invalid")
-    body = {key: value for key, value in record.items() if key != "signature"}
+    verify_ed25519_artifact(
+        public_key=public_key,
+        signature=record["signature"],
+        domain=signature_domain,
+        canonical_payload=_canonical_bytes(
+            {key: value for key, value in record.items() if key != "signature"}
+        ),
+    )
+
+
+def verify_ed25519_artifact(
+    *, public_key: bytes, signature: str, domain: bytes, canonical_payload: bytes,
+) -> None:
+    """Pure Ed25519 verifier shared by anchors and public signed artifacts."""
+    try:
+        signature_bytes = _b64d(signature)
+    except Exception as exc:
+        raise AnchorSinkError("anchor signing material is malformed") from exc
+    if len(public_key) != 32 or len(signature_bytes) != 64:
+        raise AnchorSinkError("anchor signing material has an invalid length")
     try:
         ed25519.Ed25519PublicKey.from_public_bytes(public_key).verify(
-            signature,
-            signature_domain + _canonical_bytes(body),
+            signature_bytes, domain + canonical_payload,
         )
     except InvalidSignature as exc:
         raise AnchorSinkError("anchor signature is invalid") from exc

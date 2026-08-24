@@ -211,13 +211,14 @@ def export_audit_bundle(
     }
 
 
-def verify_audit_bundle(
+def _verify_audit_bundle_with_rows(
     bundle_path: str | Path,
     *,
     trusted_root_fingerprints: str | Iterable[str] | None = None,
     expected_latest_anchor_id: str | None = None,
-) -> dict[str, Any]:
-    """Verify a bundle from local bytes against external trust and freshness pins."""
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Verify and expose rows from the same one-time archive read."""
+    rows: list[dict[str, Any]] = []
     try:
         members = _read_archive(Path(bundle_path))
         manifest = _load_canonical_json(members["manifest.json"], "manifest.json")
@@ -275,7 +276,7 @@ def verify_audit_bundle(
             and receipt["anchors_ok"] is True
         ):
             # @fail-closed(audit-bundle-unanchored-tail)
-            return {
+            return ({
                 "status": "FAIL",
                 "ok": False,
                 "chain_id": chain["chain_id"],
@@ -287,14 +288,14 @@ def verify_audit_bundle(
                 "latest_anchor_id": latest_anchor_id,
                 **receipt_boundary,
                 "first_failure": "unsigned_rows_after_latest_anchor",
-            }
+            }, rows)
         if receipt.get("ok") is not True:
             raise AuditBundleError(
                 str(receipt.get("first_failure") or "signed_chain_verification_failed")
             )
         if not external_roots:
             # @fail-closed(audit-bundle-external-trust)
-            return {
+            return ({
                 "status": "UNTRUSTED_SELF_CONSISTENT",
                 "ok": False,
                 "chain_id": chain["chain_id"],
@@ -306,10 +307,10 @@ def verify_audit_bundle(
                 "latest_anchor_id": latest_anchor_id,
                 **receipt_boundary,
                 "first_failure": "external_trust_root_required",
-            }
+            }, rows)
         if expected_latest_anchor_id is None:
             # @fail-closed(audit-bundle-checkpoint)
-            return {
+            return ({
                 "status": "FRESHNESS_UNVERIFIED",
                 "ok": False,
                 "chain_id": chain["chain_id"],
@@ -321,10 +322,10 @@ def verify_audit_bundle(
                 "latest_anchor_id": latest_anchor_id,
                 **receipt_boundary,
                 "first_failure": "external_latest_anchor_checkpoint_required",
-            }
+            }, rows)
         if latest_anchor_id != expected_latest_anchor_id:
             # @fail-closed(audit-bundle-checkpoint-mismatch)
-            return {
+            return ({
                 "status": "FAIL",
                 "ok": False,
                 "chain_id": chain["chain_id"],
@@ -336,8 +337,8 @@ def verify_audit_bundle(
                 "latest_anchor_id": latest_anchor_id,
                 **receipt_boundary,
                 "first_failure": "expected_latest_anchor_checkpoint_mismatch",
-            }
-        return {
+            }, rows)
+        return ({
             "status": "PASS",
             "ok": True,
             "chain_id": chain["chain_id"],
@@ -349,15 +350,30 @@ def verify_audit_bundle(
             "latest_anchor_id": latest_anchor_id,
             **receipt_boundary,
             "freshness_source": "external_latest_anchor_checkpoint",
-        }
+        }, rows)
     except Exception as exc:
         # @fail-closed(audit-bundle-verification)
-        return {
+        return ({
             "status": "FAIL",
             "ok": False,
             "first_failure": _sanitized_failure_reason(exc),
             "error_class": type(exc).__name__,
-        }
+        }, rows)
+
+
+def verify_audit_bundle(
+    bundle_path: str | Path,
+    *,
+    trusted_root_fingerprints: str | Iterable[str] | None = None,
+    expected_latest_anchor_id: str | None = None,
+) -> dict[str, Any]:
+    """Verify a bundle from local bytes against external trust and freshness pins."""
+    result, _rows = _verify_audit_bundle_with_rows(
+        bundle_path,
+        trusted_root_fingerprints=trusted_root_fingerprints,
+        expected_latest_anchor_id=expected_latest_anchor_id,
+    )
+    return result
 
 
 def _sanitized_failure_reason(exc: Exception) -> str:

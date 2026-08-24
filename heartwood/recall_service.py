@@ -26,6 +26,7 @@ from socketserver import ThreadingMixIn
 from typing import Any
 from urllib import error, request
 
+from .anchors import LocalFileAnchorSink
 from .client import Heartwood
 from .envelope import Policy
 from .ergonomics import list_value, normalize_tenant, principal_from
@@ -404,6 +405,9 @@ class RecallEngine:
             self.embedder_pair = get_embedder()
             self.reranker_pair = get_reranker()
         self.index = index
+        anchor_path = os.environ.get("HEARTWOOD_ANCHOR_PATH")
+        self.anchor_sink = LocalFileAnchorSink(anchor_path) if anchor_path else None
+        self.anchor_root_fingerprints = os.environ.get("HEARTWOOD_ANCHOR_ROOT_FINGERPRINT")
         self.clients: dict[str, Heartwood] = {}
         # RecallHTTPServer is intentionally single-threaded for the local daemon.
         # Keep this engine lock anyway: caches, clients, and numpy index state are
@@ -433,6 +437,8 @@ class RecallEngine:
                     embedder=self.embedder_pair,
                     reranker=self.reranker_pair,
                     index=self.index,
+                    anchor_sink=self.anchor_sink,
+                    anchor_root_fingerprints=self.anchor_root_fingerprints,
                 )
             return self.clients[tenant_id]
 
@@ -509,6 +515,8 @@ class RecallEngine:
                 "index_lag": out["index_lag"],
                 "result_count": len(out["results"]),
                 "results": out["results"],
+                "receipt": out.get("receipt"),
+                "receipt_unavailable_reason": out.get("receipt_unavailable_reason"),
                 "models": {
                     "embedder": self.embedder_name,
                     "reranker": self.reranker_name,
@@ -917,16 +925,24 @@ class RecallEngine:
             receipt = self.client(tenant).forget(
                 subject,
                 mode=mode,
-                actor=str(payload.get("actor") or "agent:recall-service"),
+                actor=(
+                    principal.id
+                    if principal is not None
+                    else str(payload.get("actor") or "agent:recall-service")
+                ),
                 reason=str(payload.get("reason") or ""),
                 legal_basis=str(payload.get("legal_basis") or ""),
             )
             return {"ok": True, "tenant": tenant, **receipt}
 
+    def recall_receipt(self, recall_id: str, *, principal: Principal) -> dict[str, Any] | None:
+        with self._lock:
+            return self.client(principal.tenant).recall_receipt(principal.id, recall_id)
+
     def close(self) -> None:
         with self._lock:
             for client in self.clients.values():
-                client.store.close()
+                client.close()
             self.clients.clear()
 
 
@@ -1102,6 +1118,21 @@ def build_handler(
                         status = 401
                         return
                     self._json(engine.metrics())
+                    return
+                match = re.fullmatch(r"/recall/(recall_[a-z0-9]+)/receipt", self.path)
+                if match is not None:
+                    credential = self._authorized(require_token=True)
+                    if credential is False:
+                        status = 401
+                        return
+                    receipt = engine.recall_receipt(
+                        match.group(1), principal=credential.principal,
+                    )
+                    if receipt is None:
+                        self._json({"ok": False, "error": "not_found"}, status=404)
+                        status = 404
+                        return
+                    self._json({"ok": True, "receipt": receipt})
                     return
                 self._json({"ok": False, "error": "not_found"}, status=404)
                 status = 404
@@ -1998,6 +2029,8 @@ def _path_category(path: str) -> str:
         return "health"
     if p in {"/recall", "/explain-recall"}:
         return "recall"
+    if re.fullmatch(r"/recall/recall_[a-z0-9]+/receipt", p):
+        return "recall_receipt"
     if p == "/forget":
         return "forget"
     if p == "/metrics":
