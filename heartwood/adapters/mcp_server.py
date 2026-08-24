@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import __version__
+from ..anchors import LocalFileAnchorSink
 from ..client import Heartwood
 from ..ergonomics import attr_pairs, list_value, normalize_tenant, policy_from, principal_from
 from .memory_tool import MemoryToolBackend
@@ -234,6 +235,8 @@ class MCPMemoryAPI:
             "recall_id": out["recall_id"],
             "index_lag": out["index_lag"],
             "result_count": len(out["results"]),
+            "receipt": out["receipt"],
+            "receipt_unavailable_reason": out["receipt_unavailable_reason"],
             "results": [
                 {
                     "id": r["id"],
@@ -244,6 +247,13 @@ class MCPMemoryAPI:
                     "classification": r["classification"],
                     "truth_status": r["truth_status"],
                     "source_ids": r["source_ids"],
+                    "source_uri": r["source_uri"],
+                    "created_by": r["created_by"],
+                    "content_hash": r["content_hash"],
+                    "producer_sig": r["producer_sig"],
+                    "producer_key_fingerprint": r["producer_key_fingerprint"],
+                    "signature_valid_at_serve": r["signature_valid_at_serve"],
+                    "content_hash_match_at_serve": r["content_hash_match_at_serve"],
                     "provenance_valid": r["provenance"].get("signature_valid"),
                     "content_hash_match": r["provenance"].get("content_hash_match"),
                     **(
@@ -331,7 +341,13 @@ def build_server(db: Heartwood | None = None, backend: MemoryToolBackend | None 
 
     db_path_value = os.environ.get("HEARTWOOD_DB_PATH", ":memory:")
     db_path = db_path_value if db_path_value == ":memory:" else Path(db_path_value)
-    db = db or Heartwood(path=db_path, tenant=os.environ.get("HEARTWOOD_TENANT", "tenant:default"))
+    anchor_path = os.environ.get("HEARTWOOD_ANCHOR_PATH")
+    db = db or Heartwood(
+        path=db_path,
+        tenant=os.environ.get("HEARTWOOD_TENANT", "tenant:default"),
+        anchor_sink=LocalFileAnchorSink(anchor_path) if anchor_path else None,
+        anchor_root_fingerprints=os.environ.get("HEARTWOOD_ANCHOR_ROOT_FINGERPRINT"),
+    )
     backend = backend or MemoryToolBackend(db)
     api = MCPMemoryAPI(db, backend)
     mcp = FastMCP(name)

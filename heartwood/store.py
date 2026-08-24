@@ -56,6 +56,12 @@ CREATE TABLE IF NOT EXISTS audit_log (seq INTEGER PRIMARY KEY AUTOINCREMENT,
 CREATE TABLE IF NOT EXISTS store_metadata (
   key TEXT PRIMARY KEY, value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS receipt_failures (
+  operation_id TEXT PRIMARY KEY, tenant TEXT NOT NULL, subject TEXT NOT NULL,
+  initiated_at_utc TEXT NOT NULL, completed_at_utc TEXT,
+  purge_completed INTEGER NOT NULL, key_state_after TEXT,
+  failure_stage TEXT NOT NULL, error_class TEXT NOT NULL, created_at REAL NOT NULL
+);
 """
 
 _MEMORY_META_COLUMNS = (
@@ -519,8 +525,22 @@ class Store:
         ]
 
     def subject_ids(self, tenant: str, subject: str) -> list[str]:
-        return [r["id"] for r in self.conn.execute(
-            "SELECT id FROM memories WHERE tenant=? AND subject=?", (tenant, subject))]
+        selected = []
+        for row in self.conn.execute(
+            "SELECT id,subject,subject_ids_json FROM memories WHERE tenant=?",
+            (tenant,),
+        ):
+            try:
+                aliases = json.loads(row["subject_ids_json"] or "[]")
+            except Exception as exc:
+                # @fail-closed(erasure-secondary-subject-selector): malformed
+                # alias metadata stops the destructive operation before key shred.
+                raise ValueError("subject_ids_json is not valid JSON") from exc
+            if not isinstance(aliases, list) or not all(isinstance(item, str) for item in aliases):
+                raise ValueError("subject_ids_json must contain a string array")
+            if row["subject"] == subject or subject in aliases:
+                selected.append(row["id"])
+        return selected
 
     def descendants(self, seed_ids) -> set[str]:
         """All memories transitively derived from the seeds (via prov_edges).
@@ -575,8 +595,31 @@ class Store:
         self.conn.commit()
 
     def shred_key(self, tenant, subject):
-        self.conn.execute("UPDATE keys SET dek=NULL, state='shredded' WHERE tenant=? AND subject=?",
-                          (tenant, subject))
+        self.conn.execute(
+            "INSERT INTO keys (tenant,subject,dek,state) VALUES (?,?,NULL,'shredded') "
+            "ON CONFLICT(tenant,subject) DO UPDATE SET dek=NULL,state='shredded'",
+            (tenant, subject),
+        )
+        self.conn.commit()
+
+    def record_receipt_failure(
+        self, *, operation_id: str, tenant: str, subject: str,
+        initiated_at_utc: str, completed_at_utc: str | None,
+        purge_completed: bool, key_state_after: str | None,
+        failure_stage: str, error_class: str,
+    ) -> None:
+        """Persist a restricted, content-free operational receipt failure record."""
+        self.conn.execute(
+            "INSERT OR REPLACE INTO receipt_failures "
+            "(operation_id,tenant,subject,initiated_at_utc,completed_at_utc,"
+            "purge_completed,key_state_after,failure_stage,error_class,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                operation_id, tenant, subject, initiated_at_utc, completed_at_utc,
+                int(purge_completed), key_state_after, failure_stage, error_class,
+                time.time(),
+            ),
+        )
         self.conn.commit()
 
     # -- audit ----------------------------------------------------------- #

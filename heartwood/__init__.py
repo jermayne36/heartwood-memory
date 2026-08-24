@@ -1,98 +1,76 @@
-"""Heartwood — provenance-first, embedded agent-memory library (Phase 0).
+"""Heartwood — provenance-first, embedded agent-memory library.
 
-The differentiation is governance — tamper-evident provenance + policy-enforced
-recall + crypto-shred erasure — over benchmark-validated hybrid retrieval. NOT a
-novel retrieval mechanism (spreading activation was CUT).
-
-    from heartwood import Heartwood, Principal, Policy
-    db = Heartwood(path="mem.db", tenant="tenant:acme")
-    mid = db.remember("User prefers concise answers.", subject="user:1",
-                      created_by="agent:asst", kind="semantic", epistemic="user-stated")
-    out = db.recall("how should I talk to this user?",
-                    principal=Principal(id="agent:asst", tenant="tenant:acme"))
+Public exports are lazy so the offline receipt verifier can run from the wheel
+without importing retrieval/model dependencies. Accessing an embedded-memory
+API imports its owning module on demand.
 """
-from .client import Heartwood
-from .anchors import (
-    AnchorConfigurationError,
-    AnchorError,
-    AnchorSink,
-    AnchorSinkError,
-    AnchorWriteError,
-    LocalFileAnchorSink,
-    anchor_root_fingerprint,
-    verify_chain_against_anchors,
-)
-from .egress import DENIED, EXTERNAL_ALLOWED, EXTERNAL_REDACTED, HUMAN_REVIEW, LOCAL_ONLY
-from .envelope import Epistemic, Kind, Memory, Policy, TruthStatus
-from .ergonomics import normalize_tenant, policy_from, principal_from, tenant_slug
-from .key_custody import (
-    Ed25519Signer,
-    KeyCustodian,
-    LocalKmsCustodian,
-    RawKeyCustodian,
-    SigningKeyCustodian,
-)
-from .key_lifecycle import (
-    CryptoEraseProof,
-    ProvenanceAliasReport,
-    RewrapReport,
-    RotationReport,
-    TenantRootMaterial,
-    provision_tenant_root,
-    prove_crypto_erase_path,
-    register_rotation_provenance_aliases,
-    rewrap_tenant_keys,
-    rotate_tenant_root,
-)
-from .policy import Principal
-from .strict import (
-    StrictConfigurationError,
-    StrictMode,
-    StrictSignatureError,
-)
+from __future__ import annotations
 
-__all__ = [
-    "Heartwood",
-    "AnchorSink",
-    "LocalFileAnchorSink",
-    "AnchorError",
-    "AnchorConfigurationError",
-    "AnchorSinkError",
-    "AnchorWriteError",
-    "anchor_root_fingerprint",
-    "verify_chain_against_anchors",
-    "Principal",
-    "Policy",
-    "Memory",
-    "Kind",
-    "Epistemic",
-    "TruthStatus",
-    "normalize_tenant",
-    "tenant_slug",
-    "policy_from",
-    "principal_from",
-    "LocalKmsCustodian",
-    "RawKeyCustodian",
-    "KeyCustodian",
-    "SigningKeyCustodian",
-    "Ed25519Signer",
-    "TenantRootMaterial",
-    "RewrapReport",
-    "ProvenanceAliasReport",
-    "RotationReport",
-    "CryptoEraseProof",
-    "provision_tenant_root",
-    "rewrap_tenant_keys",
-    "rotate_tenant_root",
-    "register_rotation_provenance_aliases",
-    "prove_crypto_erase_path",
-    "EXTERNAL_ALLOWED",
-    "EXTERNAL_REDACTED",
-    "LOCAL_ONLY",
-    "HUMAN_REVIEW",
-    "DENIED",
-    "StrictMode",
-    "StrictConfigurationError",
-    "StrictSignatureError",
-]
+from importlib import import_module
+
+_EXPORTS = {
+    "Heartwood": (".client", "Heartwood"),
+    "AnchorSink": (".anchors", "AnchorSink"),
+    "LocalFileAnchorSink": (".anchors", "LocalFileAnchorSink"),
+    "AnchorError": (".anchors", "AnchorError"),
+    "AnchorConfigurationError": (".anchors", "AnchorConfigurationError"),
+    "AnchorSinkError": (".anchors", "AnchorSinkError"),
+    "AnchorWriteError": (".anchors", "AnchorWriteError"),
+    "anchor_root_fingerprint": (".anchors", "anchor_root_fingerprint"),
+    "verify_chain_against_anchors": (".anchors", "verify_chain_against_anchors"),
+    "Principal": (".policy", "Principal"),
+    "Policy": (".envelope", "Policy"),
+    "Memory": (".envelope", "Memory"),
+    "Kind": (".envelope", "Kind"),
+    "Epistemic": (".envelope", "Epistemic"),
+    "TruthStatus": (".envelope", "TruthStatus"),
+    "normalize_tenant": (".ergonomics", "normalize_tenant"),
+    "tenant_slug": (".ergonomics", "tenant_slug"),
+    "policy_from": (".ergonomics", "policy_from"),
+    "principal_from": (".ergonomics", "principal_from"),
+    "LocalKmsCustodian": (".key_custody", "LocalKmsCustodian"),
+    "RawKeyCustodian": (".key_custody", "RawKeyCustodian"),
+    "KeyCustodian": (".key_custody", "KeyCustodian"),
+    "SigningKeyCustodian": (".key_custody", "SigningKeyCustodian"),
+    "Ed25519Signer": (".key_custody", "Ed25519Signer"),
+    "TenantRootMaterial": (".key_lifecycle", "TenantRootMaterial"),
+    "RewrapReport": (".key_lifecycle", "RewrapReport"),
+    "ProvenanceAliasReport": (".key_lifecycle", "ProvenanceAliasReport"),
+    "RotationReport": (".key_lifecycle", "RotationReport"),
+    "CryptoEraseProof": (".key_lifecycle", "CryptoEraseProof"),
+    "provision_tenant_root": (".key_lifecycle", "provision_tenant_root"),
+    "rewrap_tenant_keys": (".key_lifecycle", "rewrap_tenant_keys"),
+    "rotate_tenant_root": (".key_lifecycle", "rotate_tenant_root"),
+    "register_rotation_provenance_aliases": (
+        ".key_lifecycle", "register_rotation_provenance_aliases",
+    ),
+    "prove_crypto_erase_path": (".key_lifecycle", "prove_crypto_erase_path"),
+    "EXTERNAL_ALLOWED": (".egress", "EXTERNAL_ALLOWED"),
+    "EXTERNAL_REDACTED": (".egress", "EXTERNAL_REDACTED"),
+    "LOCAL_ONLY": (".egress", "LOCAL_ONLY"),
+    "HUMAN_REVIEW": (".egress", "HUMAN_REVIEW"),
+    "DENIED": (".egress", "DENIED"),
+    "StrictMode": (".strict", "StrictMode"),
+    "StrictConfigurationError": (".strict", "StrictConfigurationError"),
+    "StrictSignatureError": (".strict", "StrictSignatureError"),
+    "verify_recall_receipt": (".receipts", "verify_recall_receipt"),
+    "verify_erasure_receipt": (".receipts", "verify_erasure_receipt"),
+    "verify_erasure_against_store": (".receipts", "verify_erasure_against_store"),
+}
+
+__all__ = list(_EXPORTS)
 __version__ = "0.2.7"
+
+
+def __getattr__(name: str):
+    try:
+        module_name, attribute = _EXPORTS[name]
+    except KeyError as exc:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
+    value = getattr(import_module(module_name, __name__), attribute)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *_EXPORTS})

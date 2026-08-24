@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -14,6 +15,14 @@ from .importers.edges import import_edges
 from .importers.markdown import dev_models, import_markdown_corpus
 from .key_custody import LocalKmsCustodian, root_to_b64
 from .recall_service import RecallEngine, call_recall_service, call_forget_service, serve_recall
+from .receipts import (
+    EXPLAIN_BLOCKS,
+    b64e,
+    load_json_strict,
+    verify_erasure_against_store,
+    verify_erasure_receipt,
+    verify_recall_receipt,
+)
 from .store import Store
 
 
@@ -174,7 +183,13 @@ def cmd_forget(args: argparse.Namespace) -> dict:
     embedder = reranker = None
     if args.dev_models:
         embedder, reranker = dev_models()
-    db = Heartwood(path=args.db, tenant=args.tenant, embedder=embedder, reranker=reranker, index=args.index)
+    anchor_path = os.environ.get("HEARTWOOD_ANCHOR_PATH")
+    db = Heartwood(
+        path=args.db, tenant=args.tenant, embedder=embedder, reranker=reranker,
+        index=args.index,
+        anchor_sink=LocalFileAnchorSink(anchor_path) if anchor_path else None,
+        anchor_root_fingerprints=os.environ.get("HEARTWOOD_ANCHOR_ROOT_FINGERPRINT"),
+    )
     try:
         return {"ok": True, "tenant": db.tenant, **db.forget(
             args.subject,
@@ -377,6 +392,88 @@ def cmd_verify_audit_bundle(args: argparse.Namespace) -> dict:
     )
 
 
+def _verification_roots(args: argparse.Namespace) -> list[str]:
+    values = args.anchor_root_fingerprint or []
+    if not values and os.environ.get("HEARTWOOD_ANCHOR_ROOT_FINGERPRINT"):
+        values = [os.environ["HEARTWOOD_ANCHOR_ROOT_FINGERPRINT"]]
+    return [item.strip() for value in values for item in value.split(",") if item.strip()]
+
+
+def _load_result_array(path: Path | None) -> list[dict] | None:
+    if path is None:
+        return None
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(value, dict):
+        value = value.get("results")
+    if not isinstance(value, list):
+        raise ValueError("--results must contain a JSON array or response.results")
+    return value
+
+
+def cmd_verify_recall_receipt(args: argparse.Namespace) -> dict:
+    result = verify_recall_receipt(
+        load_json_strict(args.receipt),
+        trusted_root_fingerprints=_verification_roots(args),
+        results=_load_result_array(args.results),
+        audit_bundle=str(args.audit_bundle) if args.audit_bundle else None,
+        expected_latest_anchor_id=args.expected_latest_anchor_id,
+    )
+    if args.explain:
+        result.update(EXPLAIN_BLOCKS["recall"])
+    return result
+
+
+def cmd_verify_erasure_receipt(args: argparse.Namespace) -> dict:
+    result = verify_erasure_receipt(
+        load_json_strict(args.receipt),
+        trusted_root_fingerprints=_verification_roots(args),
+        audit_bundle=str(args.audit_bundle) if args.audit_bundle else None,
+        expected_latest_anchor_id=args.expected_latest_anchor_id,
+    )
+    if args.explain:
+        result.update(EXPLAIN_BLOCKS["erasure"])
+    return result
+
+
+def cmd_verify_erasure(args: argparse.Namespace) -> dict:
+    receipt = load_json_strict(args.receipt)
+    root_present = None if args.root_present is None else args.root_present == "true"
+    result = verify_erasure_against_store(
+        receipt, trusted_root_fingerprints=_verification_roots(args),
+        audit_bundle=str(args.audit_bundle),
+        expected_latest_anchor_id=args.expected_latest_anchor_id,
+        db_path=args.db, root_present=root_present,
+    )
+    if args.explain:
+        result.update(EXPLAIN_BLOCKS["erasure"])
+    return result
+
+
+def cmd_export_principal_keys(args: argparse.Namespace) -> dict:
+    db_path = Path(args.db).resolve()
+    connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        keys = [
+            {
+                "principal_id": row["principal_id"],
+                "algorithm": row["algorithm"],
+                "public_key_b64": b64e(bytes(row["public_key"])),
+            }
+            for row in connection.execute(
+                "SELECT principal_id,algorithm,public_key FROM principal_keys "
+                "WHERE tenant=? UNION ALL "
+                "SELECT principal_id,algorithm,public_key FROM principal_key_aliases "
+                "WHERE tenant=? ORDER BY principal_id,public_key",
+                (args.tenant, args.tenant),
+            )
+        ]
+    finally:
+        connection.close()
+    return {"schema": "heartwood.principal-keys.v1", "tenant": args.tenant, "keys": keys}
+
+
 def cmd_bench_recall(args: argparse.Namespace) -> dict:
     queries = list(args.query or ())
     if args.queries_file:
@@ -539,10 +636,19 @@ def _token(args: argparse.Namespace) -> str | None:
 def write_output(args: argparse.Namespace, payload: dict) -> None:
     if payload is None:
         return
-    text = json.dumps(payload, indent=2)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(text, encoding="utf-8")
+        output_payload = (
+            payload.get("receipt")
+            if getattr(args, "command", None) == "forget" and payload.get("receipt") is not None
+            else payload
+        )
+        if getattr(args, "command", None) == "forget" and payload.get("receipt") is not None:
+            from .receipts import canonical_bytes
+
+            args.output.write_bytes(canonical_bytes(output_payload) + b"\n")
+        else:
+            args.output.write_text(json.dumps(output_payload, indent=2), encoding="utf-8")
     stdout_payload = payload
     if getattr(args, "summary_only", False) and isinstance(payload, dict):
         stdout_payload = {key: value for key, value in payload.items() if key != "calls"}
@@ -852,6 +958,40 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     verify_bundle.add_argument("--output", type=Path)
     verify_bundle.set_defaults(handler=cmd_verify_audit_bundle)
 
+    principal_keys = subparsers.add_parser(
+        "export-principal-keys",
+        help="Export a tenant's non-secret registered principal verification keys.",
+    )
+    principal_keys.add_argument("--db", type=Path, required=True)
+    principal_keys.add_argument("--tenant", required=True)
+    principal_keys.add_argument("--output", type=Path)
+    principal_keys.set_defaults(handler=cmd_export_principal_keys)
+
+    def add_receipt_verifier(command: str, handler, *, results: bool = False, db: bool = False):
+        receipt_parser = subparsers.add_parser(command)
+        receipt_parser.add_argument("--receipt", type=Path, required=True)
+        receipt_parser.add_argument("--audit-bundle", type=Path, required=True)
+        receipt_parser.add_argument("--anchor-root-fingerprint", action="append")
+        receipt_parser.add_argument("--expected-latest-anchor-id", required=True)
+        if results:
+            receipt_parser.add_argument("--results", type=Path, required=True)
+        if db:
+            receipt_parser.add_argument("--db", type=Path, required=True)
+            receipt_parser.add_argument("--root-present", choices=("true", "false"))
+        receipt_parser.add_argument("--explain", action="store_true")
+        receipt_parser.add_argument("--output", type=Path)
+        receipt_parser.set_defaults(handler=handler)
+
+    add_receipt_verifier(
+        "verify-recall-receipt", cmd_verify_recall_receipt, results=True,
+    )
+    add_receipt_verifier(
+        "verify-erasure-receipt", cmd_verify_erasure_receipt,
+    )
+    add_receipt_verifier(
+        "verify-erasure", cmd_verify_erasure, db=True,
+    )
+
     bench = subparsers.add_parser(
         "bench-recall",
         help="Measure warm recall latency and optionally require the p95 SLO.",
@@ -882,7 +1022,10 @@ def main(argv: list[str] | None = None) -> None:
         print(f"heartwood error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
     write_output(args, payload)
-    if args.handler in {cmd_verify_audit, cmd_verify_audit_bundle} and payload.get("ok") is not True:
+    if args.handler in {
+        cmd_verify_audit, cmd_verify_audit_bundle, cmd_verify_recall_receipt,
+        cmd_verify_erasure_receipt, cmd_verify_erasure,
+    } and payload.get("ok") is not True:
         raise SystemExit(2)
     if (
         isinstance(payload, dict)

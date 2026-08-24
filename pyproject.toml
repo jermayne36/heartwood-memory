@@ -76,7 +76,7 @@ dev = [
 ]
 
 [project.scripts]
-heartwood = "heartwood.cli:main"
+heartwood = "heartwood.entrypoint:main"
 heartwood-memory = "heartwood.adapters.mcp_server:main"
 
 [tool.setuptools.data-files]

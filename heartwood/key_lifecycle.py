@@ -20,7 +20,6 @@ from .key_custody import (
     root_to_b64,
 )
 from .provenance import Signer
-from .store import Store
 
 
 @dataclass(frozen=True)
@@ -288,6 +287,8 @@ def prove_crypto_erase_path(
             proved=proved,
             reason="root absent and SQLite data files absent" if proved else "root still present",
         )
+
+    from .store import Store
 
     store = Store(str(path))
     try:
