@@ -774,7 +774,8 @@ class Heartwood:
                     typed_score, typed_signals = typed_adjusted_score(
                         score,
                         metas_by_id[mem_id],
-                        base_scale=signals.get("rerank_scale", "logit"),
+                        base_scale=signals.get("rerank_scale")
+                        or getattr(self.reranker, "score_scale", "logit"),
                         intent=filters.get("intent", "default"),
                         query_entities=filters.get("entities", ()),
                         effective_at=filters.get("effective_at"),
