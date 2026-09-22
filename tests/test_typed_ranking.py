@@ -199,6 +199,29 @@ def test_cross_encoder_scale_uses_model_activation():
     assert _cross_encoder_scale(LogitCrossEncoder()) == "logit"
 
 
+def test_dev_models_reranker_keeps_relevance_above_type_weight():
+    from heartwood.importers.markdown import dev_models
+
+    embedder, reranker = dev_models()
+    db = Heartwood(path=":memory:", tenant=TENANT, embedder=embedder, reranker=reranker)
+    relevant = db.remember(
+        "Reset password steps", subject="procedure:password-reset", created_by="loader",
+        kind="procedural", epistemic="observed-fact", confidence=1.0, truth_status="source_observed",
+        policy=Policy(classification="internal"),
+    )
+    irrelevant = db.remember(
+        "Employee parking location", subject="profile:parking", created_by="loader",
+        kind="profile", epistemic="observed-fact", confidence=1.0, truth_status="source_observed",
+        policy=Policy(classification="internal"),
+    )
+    out = db.recall(
+        "How to reset password", principal=_principal(),
+        filters={"typed": True, "intent": "profile"}, k=5, topc=10,
+    )
+    ids = [result["id"] for result in out["results"]]
+    assert ids.index(relevant) < ids.index(irrelevant)
+
+
 def test_typed_score_is_monotonic_across_cross_encoder_logit_range():
     row = {
         "kind": "semantic",

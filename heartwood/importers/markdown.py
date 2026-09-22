@@ -871,6 +871,9 @@ def _lexical_rerank(query: str, texts: list[str]) -> np.ndarray:
     return scores
 
 
+_lexical_rerank.score_scale = "probability"
+
+
 def dev_models():
     from ..retrieval import _hashing_embed
 
