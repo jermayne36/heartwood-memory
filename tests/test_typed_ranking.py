@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from heartwood import Heartwood, Policy, Principal  # noqa: E402
 from heartwood.retrieval import _hashing_embed, tokenize  # noqa: E402
+from heartwood.typed_ranking import typed_adjusted_score  # noqa: E402
 
 
 TENANT = "tenant:typed-ranking"
@@ -22,12 +23,16 @@ def _rerank(query, texts):
     return scores
 
 
-def _db() -> Heartwood:
+def _negative_rerank(query, texts):
+    return np.full(len(texts), -2.0, dtype=np.float32)
+
+
+def _db(reranker=_rerank) -> Heartwood:
     return Heartwood(
         path=":memory:",
         tenant=TENANT,
         embedder=(_hashing_embed, "test-hashing-embedder"),
-        reranker=(_rerank, "test-lexical-reranker"),
+        reranker=(reranker, "test-reranker"),
     )
 
 
@@ -35,8 +40,7 @@ def _principal() -> Principal:
     return Principal(id="agent:test", tenant=TENANT, roles=("support",), clearance="internal")
 
 
-def test_truth_status_downweights_unreviewed_generated_memory():
-    db = _db()
+def _remember_trust_pair(db: Heartwood) -> tuple[str, str]:
     content = "Refund policy covers duplicate charges within 30 days."
     observed = db.remember(
         content,
@@ -67,6 +71,12 @@ def test_truth_status_downweights_unreviewed_generated_memory():
         truth_status="generated_needs_review",
         policy=Policy(classification="internal"),
     )
+    return observed, generated
+
+
+def test_truth_status_downweights_unreviewed_generated_memory():
+    db = _db()
+    observed, generated = _remember_trust_pair(db)
 
     out = db.recall(
         "refund policy duplicate charges",
@@ -78,6 +88,67 @@ def test_truth_status_downweights_unreviewed_generated_memory():
     ids = [result["id"] for result in out["results"]]
     assert observed in ids and generated in ids
     assert ids.index(observed) < ids.index(generated)
+
+
+# @positive-control(typed-ranking-negative-base)
+def test_negative_base_keeps_observed_source_above_unreviewed_generated_memory():
+    db = _db(_negative_rerank)
+    observed, generated = _remember_trust_pair(db)
+
+    out = db.recall(
+        "refund policy duplicate charges",
+        principal=_principal(),
+        filters={"typed": True, "intent": "policy"},
+        k=5,
+        topc=10,
+    )
+    ids = [result["id"] for result in out["results"]]
+    assert ids.index(observed) < ids.index(generated)
+    results_by_id = {result["id"]: result for result in out["results"]}
+    assert results_by_id[observed]["signals"]["rerank_score"] == -2.0
+    assert results_by_id[generated]["signals"]["rerank_score"] == -2.0
+    assert results_by_id[observed]["signals"]["base_normalized"] == 0.1192
+    assert results_by_id[generated]["signals"]["base_normalized"] == 0.1192
+
+
+def test_typed_score_is_monotonic_across_cross_encoder_logit_range():
+    row = {
+        "kind": "semantic",
+        "truth_status": "source_observed",
+        "confidence": 0.8,
+    }
+    bases = (-12.0, -2.0, 0.0, 9.0)
+    scores = [typed_adjusted_score(base, row)[0] for base in bases]
+    assert scores == sorted(scores)
+    assert len(set(scores)) == len(scores)
+
+
+def test_probability_base_is_clamped_before_typed_weights():
+    row = {
+        "kind": "semantic",
+        "truth_status": "source_observed",
+        "confidence": 1.0,
+    }
+    low_score, low_signals = typed_adjusted_score(-2.0, row, base_scale="probability")
+    high_score, high_signals = typed_adjusted_score(2.0, row, base_scale="probability")
+    assert low_score == 0.0
+    assert high_score == 1.1
+    assert low_signals["base_normalized"] == 0.0
+    assert high_signals["base_normalized"] == 1.0
+
+
+def test_logit_normalization_handles_large_magnitudes():
+    row = {
+        "kind": "semantic",
+        "truth_status": "source_observed",
+        "confidence": 1.0,
+    }
+    low_score, low_signals = typed_adjusted_score(-1000.0, row)
+    high_score, high_signals = typed_adjusted_score(1000.0, row)
+    assert low_score == 0.0
+    assert high_score == 1.1
+    assert low_signals["base_normalized"] == 0.0
+    assert high_signals["base_normalized"] == 1.0
 
 
 def test_valid_at_drops_expired_memory():

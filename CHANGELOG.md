@@ -4,6 +4,9 @@ All notable changes to `heartwood-memory` are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- Fixed: typed ranking inverted trust downweights on negative cross-encoder logits.
+
 ## [0.2.7] - 2026-08-11
 
 ### Fixed
