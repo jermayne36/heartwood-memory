@@ -124,6 +124,17 @@ def _spec_for_model(model_id: str, revision: str, trust_remote_code: bool) -> Mo
     )
 
 
+def _cross_encoder_scale(ce) -> str:
+    from torch import nn
+
+    fn = getattr(ce, "activation_fn", None) or getattr(
+        ce,
+        "default_activation_function",
+        None,
+    )
+    return "probability" if isinstance(fn, nn.Sigmoid) else "logit"
+
+
 def tokenize(text: str) -> list[str]:
     return _TOKEN.findall(text.lower())
 
@@ -217,6 +228,7 @@ def get_reranker():
                 )
             return scores
 
+        rerank.score_scale = _cross_encoder_scale(ce)
         return rerank, model_name
     except Exception:
         def rerank(query, texts):
@@ -227,6 +239,7 @@ def get_reranker():
                 out[i] = len(q & d) / (len(q | d) or 1)
             return out
 
+        rerank.score_scale = "probability"
         return rerank, "lexical-overlap-reranker(dev)"
 
 

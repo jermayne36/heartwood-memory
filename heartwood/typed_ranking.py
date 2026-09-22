@@ -6,6 +6,7 @@ same scoring path customers install.
 """
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 from typing import Any
 
@@ -145,19 +146,33 @@ def typed_adjusted_score(
     base_score: float,
     row: dict[str, Any],
     *,
+    base_scale: str = "logit",
     intent: str = "default",
     query_entities: list[str] | tuple[str, ...] = (),
     effective_at: Any = None,
 ) -> tuple[float, dict[str, float]]:
+    # @fail-closed(typed-ranking-negative-base): normalize before downweights.
+    if base_scale == "logit":
+        if base_score >= 0:
+            base_normalized = 1.0 / (1.0 + math.exp(-base_score))
+        else:
+            exp_score = math.exp(base_score)
+            base_normalized = exp_score / (1.0 + exp_score)
+    elif base_scale == "probability":
+        base_normalized = min(max(float(base_score), 0.0), 1.0)
+    else:
+        raise ValueError(f"unsupported base score scale: {base_scale!r}")
+
     type_weight = type_weight_for(intent, row.get("kind", "semantic"))
     truth_weight = truth_weight_for(row)
     confidence = float(row.get("confidence") or 1.0)
     entity_overlap = entity_overlap_score(query_entities, row)
     source_bonus = 0.035 if row.get("source_ids") and row.get("source_spans") else 0.0
     recency_bonus = recency_signal(row, effective_at) * 0.035 if effective_at else 0.0
-    score = (base_score * type_weight * truth_weight * confidence) + entity_overlap + source_bonus + recency_bonus
+    score = (base_normalized * type_weight * truth_weight * confidence) + entity_overlap + source_bonus + recency_bonus
     return score, {
         "base": round(float(base_score), 4),
+        "base_normalized": round(float(base_normalized), 4),
         "type_weight": round(float(type_weight), 4),
         "truth_weight": round(float(truth_weight), 4),
         "confidence": round(float(confidence), 4),

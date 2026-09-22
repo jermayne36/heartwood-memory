@@ -24,6 +24,7 @@ from .retrieval import (
     DEFAULT_CROSS_ENCODER_TEXT_MAX_CHARS,
     DEFAULT_ST_MAX_LENGTH,
     _clip_for_cross_encoder,
+    _cross_encoder_scale,
     _load_cross_encoder,
     _load_st_model,
     _positive_int_env,
@@ -104,4 +105,5 @@ def reranker(name="bge-v2"):
             dtype=np.float32,
         )
 
+    rerank.score_scale = _cross_encoder_scale(ce)
     return rerank, f"{spec.repo_id}@{spec.revision}"

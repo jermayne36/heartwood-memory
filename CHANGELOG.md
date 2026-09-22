@@ -4,6 +4,13 @@ All notable changes to `heartwood-memory` are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- Typed recall no longer lets a trust downweight raise a candidate when the reranker returns a negative logit; the reranker score is normalized to 0..1 before type, truth and confidence weights are applied.
+
+### Changed
+- In typed recall, `score` is now on a 0 to ~1.6 scale (normalized reranker score × weights, plus bonuses) instead of a weighted raw reranker score. The raw reranker output is still reported as `signals.rerank_score` and the normalized value as `signals.base_normalized`. `typed_adjusted_score()` accepts `base_scale="logit"` (default) or `"probability"`.
+- Rerankers declare their output scale with a `score_scale` attribute on the callable. Built-in cross-encoders read it from the model's activation and the lexical dev rerankers are `"probability"`. A custom `(callable, name)` reranker without `score_scale` is treated as logit-scale in typed recall; one that returns 0..1 scores should set `score_scale = "probability"`.
+
 ## [0.2.7] - 2026-08-11
 
 ### Fixed

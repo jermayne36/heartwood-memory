@@ -118,7 +118,9 @@ db = Heartwood(
   brute-force is the default. `index="auto"` tries sqlite-vec, falls back.
 - **Embedder** → `heartwood.models.embedder("embeddinggemma" | "bge-m3" | "qwen3")`.
 - **Reranker** → `heartwood.models.reranker("bge-v2" | "mxbai" | "jina")`.
-- Still pluggable: pass any `(callable, name)` pair.
+- Still pluggable: pass any `(callable, name)` pair. For typed recall, a callable
+  that returns 0..1 scores should set `fn.score_scale = "probability"`; otherwise
+  its scores are treated as logits and passed through a sigmoid.
 
 Still per-deployment: external **KMS/HSM** for encryption keys. The Python
 scaffold uses **Ed25519** signatures when `cryptography` is installed, with a
