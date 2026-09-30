@@ -14,6 +14,8 @@ import os
 import re
 from collections import defaultdict
 from contextlib import nullcontext
+from dataclasses import dataclass
+from typing import Literal, Protocol, Sequence, TypedDict
 
 import numpy as np
 
@@ -325,6 +327,39 @@ def rrf(rank_lists, k=60):
 # Dense scoring is done by the pluggable VectorIndex (numpy / sqlite-vec), so this
 # stays index-agnostic. Candidates are already policy-filtered by the caller.
 # --------------------------------------------------------------------------- #
+class RerankCandidate(TypedDict):
+    id: str
+    text: str
+    classification: str
+    pii: bool
+    policy_scope: str
+
+
+class RerankContext(TypedDict):
+    tenant: str
+    principal_id: str
+    mode: str
+
+
+@dataclass(frozen=True)
+class RerankResult:
+    """Scores aligned with the supplied candidates, plus explain signals."""
+
+    scores: Sequence[float] | np.ndarray
+    name: str
+    scale: Literal["logit", "probability"]
+    signals: dict
+
+
+class CandidateReranker(Protocol):
+    def rerank_candidates(
+        self,
+        query: str,
+        candidates: list[RerankCandidate],
+        context: RerankContext,
+    ) -> RerankResult: ...
+
+
 def fuse_rerank(
     reranker,
     query,
@@ -335,8 +370,10 @@ def fuse_rerank(
     topc=50,
     collapse_keys: dict[str, str] | None = None,
     precedence: dict[str, int] | None = None,
+    context: RerankContext | None = None,
 ):
-    """candidates: list of {id, text}. dense_map/lexical_map: id -> score.
+    """Candidates are policy-cleared; v2 also requires labels and context.
+    Legacy callables receive only (query, texts). Maps are id -> score.
     Returns ranked (id, ce_score, signals) for explain_recall."""
     if not candidates:
         return []
@@ -347,7 +384,29 @@ def fuse_rerank(
     fused = rrf([dense_order[:topc], lex_order[:topc]])
     cand = sorted(fused, key=lambda i: -fused[i])[:topc]
 
-    ce = reranker(query, [text[i] for i in cand])
+    rerank_candidates = getattr(reranker, "rerank_candidates", None)
+    rerank_signals = {}
+    if callable(rerank_candidates):
+        # @fail-closed(rerank-v2-context)
+        if context is None:
+            raise ValueError("candidate-aware reranking requires context")
+        candidates_by_id = {c["id"]: c for c in candidates}
+        result = rerank_candidates(query, [candidates_by_id[i] for i in cand], context)
+        # @fail-closed(rerank-v2-result)
+        if result.scale not in {"logit", "probability"}:
+            raise ValueError("unsupported rerank score scale")
+        ce = np.asarray(result.scores, dtype=float)
+        if ce.shape != (len(cand),) or not np.isfinite(ce).all():
+            raise ValueError("rerank scores must be finite and aligned with candidates")
+        rerank_signals = {
+            **result.signals,
+            "reranker_name": result.name,
+            "rerank_scale": result.scale,
+        }
+        # Duplicate-collapse bookkeeping belongs to fusion, not the reranker.
+        rerank_signals.pop("duplicate_collapse", None)
+    else:
+        ce = reranker(query, [text[i] for i in cand])
     if collapse_keys is None:
         order = list(np.argsort(-ce))
     else:
@@ -375,6 +434,7 @@ def fuse_rerank(
             collapse_signal["collapsed_ids"].append(i)
             continue
         signals = {
+            **rerank_signals,
             "dense_sim": round(float(dense_map.get(i, 0.0)), 4),
             "bm25": round(float(lexical_map.get(i, 0.0)), 4),
             "rrf": round(float(fused[i]), 4),
