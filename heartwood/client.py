@@ -673,6 +673,8 @@ class Heartwood:
             return m["indexed"]
 
         metas = [m for m in self.store.candidate_meta(principal.tenant) if match(m)]
+        # @fail-closed(rerank-v2-policy-first)
+        # Only this policy-cleared view may supply rerank text and metadata.
         visible, denied = self.enforcer.allowed_view(principal, metas)
         metas_by_id = {m["id"]: m for m in visible}
         visible_ids = {m["id"] for m in visible}
@@ -703,7 +705,13 @@ class Heartwood:
         cand_ids = list(dict.fromkeys(
             [i for i, _ in dense if i in content_map]
             + sorted(lexical_map, key=lambda i: -lexical_map[i])[:topc]))
-        candidates = [{"id": i, "text": index_text_map[i]} for i in cand_ids]
+        candidates = [{
+            "id": i,
+            "text": index_text_map[i],
+            "classification": metas_by_id[i]["classification"],
+            "pii": metas_by_id[i]["pii"],
+            "policy_scope": metas_by_id[i]["policy_scope"],
+        } for i in cand_ids]
         collapse_keys = {}
         precedence = {}
         for mem_id in cand_ids:
@@ -767,6 +775,11 @@ class Heartwood:
                 topc=topc,
                 collapse_keys=collapse_keys,
                 precedence=precedence,
+                context={
+                    "tenant": principal.tenant,
+                    "principal_id": principal.id,
+                    "mode": filters.get("mode", "standard"),
+                },
             )
             if typed_mode:
                 adjusted = []
