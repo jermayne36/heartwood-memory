@@ -343,7 +343,13 @@ class RerankContext(TypedDict):
 
 @dataclass(frozen=True)
 class RerankResult:
-    """Scores aligned with the supplied candidates, plus explain signals."""
+    """Scores aligned with the supplied candidates, plus explain signals.
+
+    ``signals`` is one batch-level mapping copied (shallowly) into every
+    returned result and returned to the recall caller. Values must be
+    JSON-serializable plain types; never put per-candidate or confidential
+    values in it.
+    """
 
     scores: Sequence[float] | np.ndarray
     name: str
@@ -352,6 +358,12 @@ class RerankResult:
 
 
 class CandidateReranker(Protocol):
+    """Also callable as a v1 ``(query, texts) -> scores`` reranker: service
+    warm-up calls that form directly and never the candidate path.
+    """
+
+    def __call__(self, query: str, texts: list[str]) -> Sequence[float] | np.ndarray: ...
+
     def rerank_candidates(
         self,
         query: str,
