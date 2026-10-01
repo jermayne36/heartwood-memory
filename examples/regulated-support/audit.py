@@ -9,7 +9,7 @@ def _provenance_complete(db, mem_id) -> bool:
     meta = db.store.get_meta(mem_id)
     if not meta:
         return False
-    return bool(meta["signature_valid"]) and bool(meta["source"])
+    return bool(meta["sig_valid_cached"]) and bool(meta["source"])
 
 
 def run_compliance_audit(db, ids, nurse_res, intern_res, nurse, intern, dpo) -> tuple[list, str]:
@@ -33,8 +33,8 @@ def run_compliance_audit(db, ids, nurse_res, intern_res, nurse, intern, dpo) -> 
     intern_seen = intern_res["recalled"] + probe["results"]
     id_leak = any(r["id"] == ids["JANE_DX"] for r in intern_seen)
     content_leak = any(SECRET in (r.get("content") or "") for r in intern_seen)
-    leaked = id_leak or content_leak
-    checks.append(("Zero permission bypass (content-level)", not leaked,
+    leak_detected = id_leak or content_leak
+    checks.append(("Zero permission bypass (content-level)", not leak_detected,
                    f"restricted clinical fact never reaches intern — direct id leak={id_leak}, "
                    f"derived/content leak={content_leak} (high-water-mark label inheritance)"))
 
@@ -95,8 +95,8 @@ def _render(db, ids, nurse_res, intern_res, checks) -> str:
         out.append("```")
         out.append("")
     out.append("> The intern's answer is missing the clinical record entirely — it was never a "
-               "retrieval candidate for that principal. Existence is not leaked via count, score, "
-               "or latency.")
+               "retrieval candidate for that principal. Nothing in the result list shows one "
+               "was removed.")
     out.append("")
     out.append("## Compliance checks")
     out.append("")

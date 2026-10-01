@@ -27,7 +27,7 @@ is handled by two agents with different clearances.
    producer signature and a source URI — 100% provenance coverage.
 2. **Access is governed in the retrieval path.** The nurse (clinical clearance)
    sees the clinical record; the intern (support clearance) does **not** — and
-   its existence isn't leaked via result count, score, or latency.
+   nothing in the result list shows it was removed.
 3. **Derived data inherits sensitivity (high-water-mark).** The agent's drafted
    answer cites a restricted source, so the answer *itself* becomes restricted —
    the intern can't read it. This closes the "summary launders a restricted
