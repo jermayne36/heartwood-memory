@@ -13,9 +13,30 @@ never emits a receipt-shaped unsigned object.
 
 ## Wire contracts
 
-`heartwood.recall-receipt.v1` has this closed top-level key set:
+New recalls emit `heartwood.recall-receipt.v2` only, with this closed top-level key set:
 
 `{schema, receipt_id, recall_id, tenant, principal_id, issued_at_utc, query_hash, chain_id, audit_seq, audit_row_hash, policy, results, principal_keys, signing, receipt_hash, signature}`
+
+The v2 `policy` block is exactly `{strict_mode, visible, returned}`. The operator
+reads the denied count from the bound audit row, whose detail is exactly
+`{receipt_hash, result_count, strict_mode, visible, denied, returned, blind}`.
+`denied` is a non-negative integer, not a boolean. `blind` is 32 fresh random
+bytes per recall encoded as 64 lowercase hex characters; it appears only in the
+audit row, never in the caller's response or receipt. This random value prevents
+recovering the denied count by guessing inputs to the row hash.
+
+The verifier continues to accept v1 receipts unchanged. Their `policy` block
+also carried `denied_count`; receipt-enabled builds before this change emitted
+that schema. The committed compatibility vector was written at source revision
+`62372e9` with a throwaway root. Older verifiers reject v2 with
+`receipt_schema_invalid`, so upgrade the verifier alongside a v2 writer.
+
+`audit_seq` exposes tenant audit activity: the difference between two row
+numbers includes events by other principals. Response time can also vary;
+these receipts do not promise constant response shape or absence of all side
+channels. Recall and explanation `index_lag` count pending records the caller
+is cleared to read, independently of recall filters. Operators retain the
+tenant-wide in-process `Store.index_lag()` and `flush_index()` reads.
 
 Each recall result binds the memory ID, content hash, epistemic class, producer,
 source locator, source IDs, legacy v1 producer signature, producer-key
@@ -38,6 +59,8 @@ except `audit_row_hash`, `receipt_hash`, and `signature`; the final Ed25519
 signature commits to every field except `signature`. Recall and erasure use the
 fixed domains `heartwood.recall-receipt.v1\0` and
 `heartwood.erasure-receipt.v1\0` respectively.
+The recall signing domain serves both v1 and v2; the signed `schema` field binds
+the receipt version. The domain bytes are unchanged.
 
 Producer signatures preserve the existing v1 bytes exactly:
 

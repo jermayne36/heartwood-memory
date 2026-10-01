@@ -1,8 +1,8 @@
 """Canonical signed recall and erasure receipts, plus offline verification.
 
-Receipt v1 deliberately preserves the legacy producer-signature payload bytes:
+Recall receipts v1 and v2 preserve the legacy producer-signature payload bytes:
 ``id|content_hash|str(source_uri)|created_by|epistemic``.  A typed canonical
-producer payload is reserved for v2 because JSON null and the literal string
+producer payload requires a future version because JSON null and the literal string
 ``"None"`` collide in the v1 encoding.
 """
 from __future__ import annotations
@@ -19,7 +19,9 @@ from typing import Any, Iterable
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
-RECALL_SCHEMA = "heartwood.recall-receipt.v1"
+RECALL_SCHEMA_V1 = "heartwood.recall-receipt.v1"
+RECALL_SCHEMA = "heartwood.recall-receipt.v2"
+RECALL_SCHEMAS = (RECALL_SCHEMA_V1, RECALL_SCHEMA)
 ERASURE_SCHEMA = "heartwood.erasure-receipt.v1"
 RECALL_DOMAIN = b"heartwood.recall-receipt.v1\x00"
 ERASURE_DOMAIN = b"heartwood.erasure-receipt.v1\x00"
@@ -67,7 +69,7 @@ EXPLAIN_BLOCKS = {
             "The deployment key matching the buyer's external pin signed this exact receipt.",
             "Each returned record's registered producer key signed its id, content hash, source-locator value, producer identity, and epistemic class.",
             "The caller-supplied content matches the signed content hash.",
-            "The recall event and policy counts appear at the named row in the complete chain through the buyer's externally pinned anchor checkpoint.",
+            "The recall event and visible and returned counts appear at the named row in the complete chain through the buyer's externally pinned anchor checkpoint. In v2, the denied count is recorded in that row and is not part of the receipt.",
         ],
         "does_not_prove": [
             "That ranking or policy evaluation was correct, fair, optimal, or complete.",
@@ -230,7 +232,7 @@ def producer_signature_parts(signature: str) -> tuple[bytes, bytes]:
 
 
 def producer_payload_v1(result: dict[str, Any]) -> bytes:
-    # These bytes are a compatibility contract; typed canonical bytes are v2.
+    # These bytes are a compatibility contract; typed bytes need a future version.
     return "|".join([
         result["id"], result["content_hash"], str(result["source_uri"]),
         result["created_by"], result["epistemic"],
@@ -244,9 +246,9 @@ def _closed(value: Any, fields: set[str], reason: str) -> None:
 
 def _validate_common(receipt: dict[str, Any], *, kind: str) -> tuple[bytes, bytes]:
     expected_fields = RECALL_FIELDS if kind == "recall" else ERASURE_FIELDS
-    expected_schema = RECALL_SCHEMA if kind == "recall" else ERASURE_SCHEMA
+    expected_schemas = RECALL_SCHEMAS if kind == "recall" else (ERASURE_SCHEMA,)
     _closed(receipt, expected_fields, "receipt_fields_invalid")
-    if receipt["schema"] != expected_schema:
+    if receipt["schema"] not in expected_schemas:
         raise ReceiptError("receipt_schema_invalid")
     _closed(receipt["signing"], SIGNING_FIELDS, "signing_fields_invalid")
     signing = receipt["signing"]
@@ -320,6 +322,7 @@ def _audit_binding(
     result: dict[str, Any], receipt: dict[str, Any], *, audit_bundle: str | None,
     trusted_root_fingerprints, expected_latest_anchor_id: str | None,
     expected_detail: dict[str, Any],
+    recall_v2: bool = False,
 ) -> dict[str, Any] | None:
     if audit_bundle is None:
         return _fail(result, "audit_bundle_required", "AUDIT_UNBOUND")
@@ -342,7 +345,21 @@ def _audit_binding(
         body = json.loads(row["body"])
     except Exception:
         return _fail(result, "receipt_audit_body_invalid")
-    if body.get("detail") != expected_detail:
+    row_detail = body.get("detail")
+    if recall_v2:
+        # @fail-closed(recall-v2-audit-fields)
+        if not isinstance(row_detail, dict) or set(row_detail) != set(expected_detail) | {"denied", "blind"}:
+            return _fail(result, "audit_binding_mismatch")
+        denied, blind = row_detail["denied"], row_detail["blind"]
+        # @fail-closed(recall-v2-audit-denied)
+        if not isinstance(denied, int) or isinstance(denied, bool) or denied < 0:
+            return _fail(result, "audit_binding_mismatch")
+        # @fail-closed(recall-v2-audit-blind)
+        if not isinstance(blind, str) or len(blind) != 64 or set(blind) - set("0123456789abcdef"):
+            return _fail(result, "audit_row_unblinded")
+        row_detail = {key: row_detail[key] for key in expected_detail}
+    # @fail-closed(recall-v2-audit-counts)
+    if row_detail != expected_detail:
         return _fail(result, "audit_binding_mismatch")
     result["checked"]["audit_bound"] = True
     result["checked"]["freshness_pinned"] = True
@@ -359,7 +376,11 @@ def verify_recall_receipt(
         _validate_common(receipt, kind="recall")
         result["checked"]["receipt_hash"] = True
         result["checked"]["receipt_signature"] = True
-        _closed(receipt["policy"], {"strict_mode", "visible", "denied_count", "returned"}, "policy_fields_invalid")
+        policy_fields = {"strict_mode", "visible", "returned"}
+        if receipt["schema"] == RECALL_SCHEMA_V1:
+            policy_fields.add("denied_count")
+        # @fail-closed(recall-v2-policy-fields)
+        _closed(receipt["policy"], policy_fields, "policy_fields_invalid")
         if not isinstance(receipt["results"], list) or not isinstance(receipt["principal_keys"], list):
             raise ReceiptError("recall_arrays_invalid")
         for item in receipt["results"]:
@@ -430,14 +451,16 @@ def verify_recall_receipt(
         "result_count": len(receipt["results"]),
         "strict_mode": receipt["policy"]["strict_mode"],
         "visible": receipt["policy"]["visible"],
-        "denied": receipt["policy"]["denied_count"],
         "returned": receipt["policy"]["returned"],
     }
+    if receipt["schema"] == RECALL_SCHEMA_V1:
+        detail["denied"] = receipt["policy"]["denied_count"]
     failure = _audit_binding(
         result, receipt, audit_bundle=audit_bundle,
         trusted_root_fingerprints=trusted_root_fingerprints,
         expected_latest_anchor_id=expected_latest_anchor_id,
         expected_detail=detail,
+        recall_v2=receipt["schema"] == RECALL_SCHEMA,
     )
     if failure:
         return failure
@@ -690,7 +713,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         receipt = load_json_strict(args.receipt)
         roots = _roots(args.root)
-        if receipt.get("schema") == RECALL_SCHEMA:
+        if receipt.get("schema") in RECALL_SCHEMAS:
             result = verify_recall_receipt(
                 receipt, trusted_root_fingerprints=roots,
                 results=_load_results(args.results), audit_bundle=args.audit_bundle,

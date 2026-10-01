@@ -672,13 +672,23 @@ class Heartwood:
                 return False
             return m["indexed"]
 
-        metas = [m for m in self.store.candidate_meta(principal.tenant) if match(m)]
+        tenant_metas = self.store.candidate_meta(principal.tenant)
+        metas = [m for m in tenant_metas if match(m)]
         # @fail-closed(rerank-v2-policy-first)
         # Only this policy-cleared view may supply rerank text and metadata.
         visible, denied = self.enforcer.allowed_view(principal, metas)
         metas_by_id = {m["id"]: m for m in visible}
         visible_ids = {m["id"] for m in visible}
-        lag = self.store.index_lag(principal.tenant)
+        # Pending-record freshness follows policy, independently of recall filters.
+        lag = sum(
+            1 for m in tenant_metas
+            if not m["indexed"]
+            and not (
+                m["kind"] == "capability-contract"
+                and m.get("policy_scope", "default") == "continuity-privileged"
+            )
+            and self.enforcer.visible(principal, m)[0]
+        )
 
         # 2. Dense candidates via the VectorIndex (ANN), restricted to the
         #    policy-allowed set so restricted records are never even scored.
@@ -966,7 +976,6 @@ class Heartwood:
             policy_receipt = {
                 "strict_mode": self._strict_mode.value,
                 "visible": len(visible),
-                "denied_count": len(denied),
                 "returned": len(results),
             }
             issued_at = _utc_now_iso()
@@ -993,8 +1002,9 @@ class Heartwood:
                     "result_count": len(receipt_results),
                     "strict_mode": policy_receipt["strict_mode"],
                     "visible": policy_receipt["visible"],
-                    "denied": policy_receipt["denied_count"],
+                    "denied": len(denied),
                     "returned": policy_receipt["returned"],
+                    "blind": secrets.token_hex(32),
                 }
 
             try:

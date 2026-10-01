@@ -206,7 +206,7 @@ def receipt_policy_before_ranking(db: Heartwood) -> dict[str, Any]:
         )
         assert ok
         return {
-            "scope": "policy filters visible_ids before ANN/BM25/rerank; caller response stays constant-shape",
+            "scope": "policy filters visible_ids before ANN/BM25/rerank; denied ids never appear in the caller's results",
             "authorized_can_recall_restricted": any(
                 row["id"] == restricted_id for row in authorized["results"]
             ),
@@ -349,7 +349,7 @@ def main() -> int:
             print("command: python examples/trust_demo.py")
             _print_receipt(1, "Provenance tamper is surfaced on read", receipt_provenance_surface(db))
             _print_receipt(2, "Audit in-place tamper breaks verify_chain()", receipt_audit_tamper(db))
-            _print_receipt(3, "Policy-before-ranking returns no unauthorized score/leak", receipt_policy_before_ranking(db))
+            _print_receipt(3, "Policy-before-ranking returns no unauthorized record or score", receipt_policy_before_ranking(db))
             _print_receipt(4, "Hard forget emits key-destruction proof", receipt_crypto_shred(path))
             _print_receipt(5, "Faithfulness and egress gates reject generated memory", receipt_faithfulness_and_egress(db))
             print("\nTRUST_DEMO_RESULT: PASS")

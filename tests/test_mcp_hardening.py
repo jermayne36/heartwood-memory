@@ -17,7 +17,11 @@ from heartwood.adapters.mcp_server import (  # noqa: E402
 from heartwood.importers.markdown import dev_models  # noqa: E402
 
 
-def _api(path: Path) -> MCPMemoryAPI:
+def _api(path: Path, *, receipted: bool = False) -> MCPMemoryAPI:
+    if receipted:
+        from test_receipts import _db
+        db, _, _, _ = _db(path.parent, tenant="tenant:ops")
+        return MCPMemoryAPI(db)
     embedder, reranker = dev_models()
     return MCPMemoryAPI(
         Heartwood(
@@ -31,7 +35,7 @@ def _api(path: Path) -> MCPMemoryAPI:
 
 def test_mcp_governed_tenant_recall_and_no_denied_side_channel():
     with tempfile.TemporaryDirectory() as temp_dir:
-        api = _api(Path(temp_dir) / "heartwood.db")
+        api = _api(Path(temp_dir) / "heartwood.db", receipted=True)
         try:
             saved = api.remember(
                 "Northwind Retail auth changes require finance approval before shipping.",
@@ -54,6 +58,7 @@ def test_mcp_governed_tenant_recall_and_no_denied_side_channel():
             )
             assert no_role["ok"] is True
             assert no_role["result_count"] == 0
+            assert no_role["receipt"]["schema"] == "heartwood.recall-receipt.v2"
             assert "denied" not in json.dumps(no_role).lower()
 
             finance = api.recall(
