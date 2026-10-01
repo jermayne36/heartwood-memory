@@ -459,7 +459,11 @@ def _checkpoint(
         for row in authorized["results"]
     ):
         raise AssertionError("provenance or content-hash verification failed")
-    if authorized["index_lag"] != 0 or unauthorized["index_lag"] != 0:
+    if (
+        authorized["index_lag"] != 0
+        or unauthorized["index_lag"] != 0
+        or db.flush_index()["index_lag"] != 0
+    ):
         raise AssertionError("demo requires read-your-writes (index_lag=0)")
     if db.verify_audit() is not True:
         raise AssertionError("audit chain failed verification at checkpoint")

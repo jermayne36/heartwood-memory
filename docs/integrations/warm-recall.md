@@ -91,6 +91,8 @@ heartwood recall `
 Both paths return JSON with `recall_id`, `latency_ms`, `index_lag`, result
 metadata, provenance validation, ranking signals, and source IDs.
 
+`index_lag` is the number of records awaiting indexing that the calling principal is cleared to read. An operator reads the tenant-wide figure in-process from `flush_index()`.
+
 ## Delete A Subject
 
 For deletion hooks and DSAR workflows that cannot call Python directly, use the

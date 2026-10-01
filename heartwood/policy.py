@@ -1,9 +1,9 @@
 """Policy in the retrieval path.
 
-Principle (adversarial-review finding): a similarity hit must never bypass
-permissions, and existence must not leak. Enforcement gates the *candidate set*
-before ranking; the client returns constant-shape responses so denials are
-unobservable via count/score/latency.
+Principle: a similarity hit must never bypass permissions. Enforcement gates
+the *candidate set* before ranking; denied records are not scored or returned.
+The operator reads denial counts in the audit log. Response time and audit
+activity are outside this result-list guarantee.
 """
 from __future__ import annotations
 
