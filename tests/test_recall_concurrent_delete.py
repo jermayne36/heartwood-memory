@@ -89,12 +89,12 @@ def test_invalid_signature_still_obeys_strict_mode(memories):
     else:
         items = db.recall("Verification record", principal=reader, k=10)["results"]
         by_id = {item["id"]: item for item in items}
-        assert by_id[kept]["signature_valid_at_serve"] is True
+        assert by_id[kept]["provenance"]["signature_valid"] is True
         if mode == "filter":
             assert set(by_id) == {kept}
         else:
             assert set(by_id) == {target, kept}
-            assert by_id[target]["signature_valid_at_serve"] is False
+            assert by_id[target]["provenance"]["signature_valid"] is False
 
 
 # @positive-control(recall-incomplete-root)
