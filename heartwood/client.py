@@ -809,15 +809,22 @@ class Heartwood:
             if meta is None:
                 continue
             provenance = chain(self.store, mem_id, self.signer)
+            # @fail-closed(recall-vanished-root)
+            # The provenance read can occur after a deletion of the fetched row.
+            if provenance.get("missing"):
+                continue
+            incomplete_root = bool(provenance.get("cycle_or_depth_cut"))
             content = content_map[mem_id]
             actual_content_hash = hash_content(content)
             content_hash_match = (
                 bool(meta.get("content_hash"))
                 and actual_content_hash == meta["content_hash"]
             )
-            content_signature_valid = verify_meta(self.signer, meta, content)
+            content_signature_valid = (
+                not incomplete_root and verify_meta(self.signer, meta, content)
+            )
             provenance["signature_valid"] = (
-                provenance["signature_valid"] and content_signature_valid
+                provenance.get("signature_valid", False) and content_signature_valid
             )
             provenance["content_hash_match"] = content_hash_match
             strict_exempt_manifest_id = None
@@ -830,6 +837,7 @@ class Heartwood:
             ):
                 if (
                     self._strict_cutover is not None
+                    and not incomplete_root
                     and self._strict_cutover.match(
                         meta=meta,
                         actual_content_hash=actual_content_hash,
@@ -851,6 +859,9 @@ class Heartwood:
                     )
                     if self._strict_mode is StrictMode.FILTER:
                         continue
+            # @fail-closed(recall-incomplete-root)
+            if incomplete_root:
+                continue
             result = {
                 "id": mem_id, "content": content, "score": round(score, 4),
                 "epistemic": meta["epistemic"], "confidence": meta["confidence"],
