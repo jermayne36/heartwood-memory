@@ -2,14 +2,26 @@
 
 All notable changes to `heartwood-memory` are documented here.
 
-## [Unreleased]
+## [0.2.8] - 2026-10-02
+
+### Added
+- Portable, signed recall and erasure receipts with offline verification commands: `export-principal-keys`, `verify-recall-receipt`, `verify-erasure-receipt`, and `verify-erasure`. Receipt issuance requires durable signing custody and an audit anchor sink; without them, responses report that a receipt is unavailable. The verifier checks the supplied results or inspected store against the receipt and an audit bundle using an externally pinned root and anchor checkpoint.
+- Recall results now include producer identity, source locator, content hash, producer signature and key fingerprint, and signature/content checks recomputed while serving. The embedded client, HTTP recall service and MCP adapter expose the receipt and its unavailable reason. Offline verification commands can run without loading retrieval models.
+- Optional candidate-aware reranking through `rerank_candidates(query, candidates, context)`. It receives policy-cleared text and metadata (`id`, `classification`, `pii`, `policy_scope`) plus tenant, principal and recall mode, and returns aligned finite scores, a name, score scale and batch-level explanation signals. Existing `(query, texts)` rerankers keep working; candidate-aware rerankers must also support that form for service warm-up. Explanation signals are returned to the caller and should not contain confidential or per-candidate values.
 
 ### Fixed
 - Typed recall no longer lets a trust downweight raise a candidate when the reranker returns a negative logit; the reranker score is normalized to 0..1 before type, truth and confidence weights are applied.
+- Recall skips a record deleted between candidate selection and provenance verification instead of failing the request. Incomplete provenance roots are excluded, including when strict cutover exemptions are configured.
+- The regulated-support example reads the stored signature-verification field correctly when checking provenance.
 
 ### Changed
 - In typed recall, `score` is now on a 0 to ~1.6 scale (normalized reranker score × weights, plus bonuses) instead of a weighted raw reranker score. The raw reranker output is still reported as `signals.rerank_score` and the normalized value as `signals.base_normalized`. `typed_adjusted_score()` accepts `base_scale="logit"` (default) or `"probability"`.
 - Rerankers declare their output scale with a `score_scale` attribute on the callable. Built-in cross-encoders read it from the model's activation and the lexical dev rerankers are `"probability"`. A custom `(callable, name)` reranker without `score_scale` is treated as logit-scale in typed recall; one that returns 0..1 scores should set `score_scale = "probability"`.
+- New recall receipts use `heartwood.recall-receipt.v2`, whose `policy` block is exactly `{strict_mode, visible, returned}`. The earlier v1 writer on `main` included `denied_count`, the number of matching records policy denied to the caller. The v2 caller receipt no longer carries that count; the operator's bound audit row retains `denied` and adds a fresh random `blind` value that is not returned to the caller. The verifier still accepts v1 receipts; older verifiers reject v2, so upgrade the verifier with the writer.
+- Portable recall and erasure receipts first ship on PyPI in 0.2.8: their v1 implementation arrived on `main` after the 0.2.7 tag. The 0.2.7 package already had rotation and audit-anchor receipts, which are separate interfaces.
+- Fetching a cached recall receipt by address requires an authenticated credential for the original principal. Recall and explanation `index_lag` now report pending records the caller is cleared to read, independently of recall filters. Operator `Store.index_lag()` and `flush_index()` remain tenant-wide; the rotation-continuity example uses the operator read for its freshness check.
+- Policy-filtering documentation and examples now scope their claims to the result list: denied records are not scored or returned, and nothing in the result list shows one was removed. Audit row numbers still expose audit activity, and response time can vary.
+- Public package and server metadata use the governed-memory title. The MCP Registry publishing workflow now uses GitHub OIDC, verifies its pinned publisher download and runs only when manually dispatched on `main`; creating a package release tag does not publish MCP Registry metadata.
 
 ## [0.2.7] - 2026-08-11
 
