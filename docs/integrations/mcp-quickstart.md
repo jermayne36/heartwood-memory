@@ -78,7 +78,7 @@ fail closed at server startup.
 | Tool | Purpose |
 |---|---|
 | `remember` | Tenant-aware governed write with classification, roles, attrs, source IDs, provenance signing, audit, encryption, and indexing |
-| `recall` | Policy-enforced recall; denied memories are not scored or returned |
+| `recall` | Policy-enforced recall; denied memories are not returned, or counted in the results or the receipt |
 | `explain_recall` | Ranking/freshness explanation without denied-candidate side channels |
 | `forget` | Crypto-shred subject key and purge derived memories |
 | `evaluate_egress` | Check source spans before external model egress |
@@ -96,7 +96,7 @@ The test verifies:
 
 - confidential memories are invisible without required roles;
 - successful recall includes provenance validity and source IDs;
-- MCP responses from a store with no signing root contain no denied count;
+- MCP responses do not expose a denied count;
 - `forget()` purges the governed memory path;
 - `/memories` path traversal remains confined.
 
