@@ -691,7 +691,8 @@ class Heartwood:
         )
 
         # 2. Dense candidates via the VectorIndex (ANN), restricted to the
-        #    policy-allowed set so restricted records are never even scored.
+        #    policy-allowed set so both indexes filter before scoring;
+        #    denied records are never scored or returned by this search.
         qv = self.embedder([cue])[0]
         dense = self.index.search(principal.tenant, qv, topc, allowed_ids=visible_ids)
         dense_map = {i: s for i, s in dense}
