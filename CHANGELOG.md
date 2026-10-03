@@ -2,6 +2,14 @@
 
 All notable changes to `heartwood-memory` are documented here.
 
+## [0.2.9] - 2026-10-03
+
+### Fixed
+- The opt-in sqlite-vec index now scores only records the caller is allowed to see, so denied records near the query no longer reduce the returned results. Small allow-lists use per-id lookups; large ones use one filtered pass. Ties sort by id. Requests with `n <= 0` or an empty allow-list return an empty result. Response time still varies with how many records exist.
+
+### Changed
+- The README and MCP quickstart clarify that denied records are not returned or counted in the results or the signed recall receipt, reflecting the receipt changes released in 0.2.8.
+
 ## [0.2.8] - 2026-10-02
 
 ### Added
