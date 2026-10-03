@@ -11,6 +11,8 @@ are returned (allowed_ids passed into search()).
 """
 from __future__ import annotations
 
+import json
+
 import numpy as np
 
 
@@ -80,6 +82,8 @@ class NumpyVectorIndex(VectorIndex):
 
 class SqliteVecIndex(VectorIndex):
     name = "sqlite-vec"
+    # Longest allow-list served by primary-key lookups; longer lists walk the table.
+    POINT_LOOKUP_LIMIT = 256
 
     def __init__(self, store):
         try:
@@ -119,23 +123,42 @@ class SqliteVecIndex(VectorIndex):
             self.conn.commit()
 
     def search(self, tenant, query_vec, n, allowed_ids=None):
-        if self._dim is None:
+        if self._dim is None or n <= 0 or (allowed_ids is not None and not allowed_ids):
             return []
         q = self._serialize(np.asarray(query_vec, dtype=np.float32).tolist())
-        # tenant filter is a native vec0 metadata constraint; over-fetch then
-        # apply the fine-grained policy allow-list in Python.
-        k = n if allowed_ids is None else max(n * 5, n + 50)
-        rows = self.conn.execute(
-            "SELECT memid, distance FROM heartwood_vec WHERE tenant=? AND emb MATCH ? AND k=? "
-            "ORDER BY distance", (tenant, q, k)).fetchall()
-        out = []
-        for memid, distance in rows:
-            if allowed_ids is not None and memid not in allowed_ids:
-                continue
-            out.append((memid, -float(distance)))   # similarity rank = -L2 distance
-            if len(out) >= n:
-                break
-        return out
+        if allowed_ids is not None:
+            # Both statements score only rows that pass the id and tenant tests.
+            ids = list(set(allowed_ids))
+            if len(ids) <= self.POINT_LOOKUP_LIMIT:
+                # Few ids: one primary-key lookup each, so the work follows the
+                # allow-list and not the size of the table.
+                sql = ("SELECT v.memid, vec_distance_l2(v.emb, ?) AS distance "
+                       "FROM json_each(?) AS a CROSS JOIN heartwood_vec AS v ON v.memid=a.value "
+                       "WHERE v.tenant=? ORDER BY distance, v.memid LIMIT ?")
+            else:
+                # Many ids: one walk of the table costs less than a lookup per
+                # id. Testing the id first skips the tenant read for other rows.
+                sql = ("SELECT memid, vec_distance_l2(emb, ?) AS distance FROM heartwood_vec "
+                       "WHERE memid IN (SELECT value FROM json_each(?)) AND tenant=? "
+                       "ORDER BY distance, memid LIMIT ?")
+            rows = self.conn.execute(sql, (q, json.dumps(ids), tenant, n)).fetchall()
+        else:
+            rows = []
+            if n < 4096:
+                # vec0 rejects a second KNN sort key. Materialize first, then
+                # sort ties by id. One extra hit detects a tie at the cutoff.
+                rows = self.conn.execute(
+                    "WITH nearest AS MATERIALIZED ("
+                    "SELECT memid, distance FROM heartwood_vec WHERE tenant=? AND emb MATCH ? AND k=?) "
+                    "SELECT memid, distance FROM nearest ORDER BY distance, memid",
+                    (tenant, q, n + 1)).fetchall()
+            if n >= 4096 or (len(rows) > n and rows[n - 1][1] == rows[n][1]):
+                # KNN may omit a smaller id at a tied cutoff. The exact scan
+                # also handles requests beyond vec0's 4096 KNN limit.
+                rows = self.conn.execute(
+                    "SELECT memid, vec_distance_l2(emb, ?) AS distance FROM heartwood_vec "
+                    "WHERE tenant=? ORDER BY distance, memid LIMIT ?", (q, tenant, n)).fetchall()
+        return [(memid, -float(distance)) for memid, distance in rows[:n]]   # similarity rank = -L2 distance
 
     def rebuild(self, store):
         if self._dim is not None:
