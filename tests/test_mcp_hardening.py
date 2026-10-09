@@ -1,4 +1,5 @@
 """Phase 1 B4 MCP hardening tests."""
+import asyncio
 import json
 import os
 import sys
@@ -6,6 +7,8 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from mcp.server.fastmcp.exceptions import ToolError  # noqa: E402
 
 from heartwood import Heartwood, __version__  # noqa: E402
 from heartwood.adapters.mcp_server import (  # noqa: E402
@@ -15,13 +18,10 @@ from heartwood.adapters.mcp_server import (  # noqa: E402
     build_server,
 )
 from heartwood.importers.markdown import dev_models  # noqa: E402
+from heartwood.policy import Principal  # noqa: E402
 
 
-def _api(path: Path, *, receipted: bool = False) -> MCPMemoryAPI:
-    if receipted:
-        from test_receipts import _db
-        db, _, _, _ = _db(path.parent, tenant="tenant:ops")
-        return MCPMemoryAPI(db)
+def _api(path: Path) -> MCPMemoryAPI:
     embedder, reranker = dev_models()
     return MCPMemoryAPI(
         Heartwood(
@@ -33,10 +33,22 @@ def _api(path: Path, *, receipted: bool = False) -> MCPMemoryAPI:
     )
 
 
+def _tool(server, name: str, arguments: dict):
+    output = asyncio.run(server.call_tool(name, arguments))
+    if isinstance(output, dict):
+        return output
+    if isinstance(output, tuple):
+        return output[1]
+    return json.loads(output[0].text)
+
+
 def test_mcp_governed_tenant_recall_and_no_denied_side_channel():
     with tempfile.TemporaryDirectory() as temp_dir:
-        api = _api(Path(temp_dir) / "heartwood.db", receipted=True)
+        from test_receipts import _db
+        db, _, _, _ = _db(Path(temp_dir), tenant="tenant:northwind-retail")
+        api = MCPMemoryAPI(db)
         try:
+            # The operator seeds through the trusted Python facade.
             saved = api.remember(
                 "Northwind Retail auth changes require finance approval before shipping.",
                 subject="northwind-retail:auth",
@@ -50,33 +62,40 @@ def test_mcp_governed_tenant_recall_and_no_denied_side_channel():
             assert saved["tenant"] == "tenant:northwind-retail"
             assert saved["classification"] == "confidential"
 
-            no_role = api.recall(
-                "auth changes finance approval",
-                tenant="northwind-retail",
-                principal_id="agent:ops",
-                clearance="confidential",
+            # MCP clients recall through tools as the server's configured principal.
+            ops, _, _ = build_server(
+                db, principal=Principal("agent:ops", db.tenant, clearance="confidential")
             )
+            no_role = _tool(ops, "recall", {"cue": "auth changes finance approval"})
             assert no_role["ok"] is True
             assert no_role["result_count"] == 0
             assert no_role["receipt"]["schema"] == "heartwood.recall-receipt.v2"
             assert "denied" not in json.dumps(no_role).lower()
 
-            finance = api.recall(
-                "auth changes finance approval",
-                tenant="northwind-retail",
-                principal_id="agent:finance",
-                roles=["finance"],
-                clearance="confidential",
+            # A client cannot claim the finance role the server was not given.
+            try:
+                claimed = _tool(ops, "recall", {"cue": "auth changes finance approval", "roles": ["finance"]})
+            except ToolError as exc:
+                assert "roles cannot be set by an MCP client" in str(exc)
+            else:
+                raise AssertionError(f"client-chosen roles were accepted: {claimed}")
+
+            finance_server, _, _ = build_server(
+                db,
+                principal=Principal(
+                    "agent:finance", db.tenant, roles=("finance",), clearance="confidential"
+                ),
             )
+            finance = _tool(finance_server, "recall", {"cue": "auth changes finance approval"})
             assert finance["result_count"] == 1
             result = finance["results"][0]
             assert result["id"] == saved["id"]
             assert result["classification"] == "confidential"
-            assert result["source_ids"] == ("doc://northwind-retail/auth-approval",)
+            assert list(result["source_ids"]) == ["doc://northwind-retail/auth-approval"]
             assert result["provenance_valid"] is True
             assert result["content_hash_match"] is True
 
-            explain = api.explain_recall(finance["recall_id"], tenant="northwind-retail")
+            explain = _tool(finance_server, "explain_recall", {"recall_id": finance["recall_id"]})
             assert "denied" not in json.dumps(explain).lower()
 
             receipt = api.forget(
@@ -86,13 +105,7 @@ def test_mcp_governed_tenant_recall_and_no_denied_side_channel():
                 reason="test erasure",
             )
             assert receipt["purged"] == 1
-            after = api.recall(
-                "auth changes finance approval",
-                tenant="northwind-retail",
-                principal_id="agent:finance",
-                roles=["finance"],
-                clearance="confidential",
-            )
+            after = _tool(finance_server, "recall", {"cue": "auth changes finance approval"})
             assert after["results"] == []
         finally:
             api.close()

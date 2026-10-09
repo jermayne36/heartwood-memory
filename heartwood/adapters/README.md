@@ -86,6 +86,17 @@ subset (`recall`, `explain_recall`, `health`). To expose the write/deletion verb
 `HEARTWOOD_MCP_ALLOWED_TOOLS`; the server logs a stderr warning whenever a
 destructive verb is exposed.
 
+Identity is bound by the server, not chosen by the client. Every tool call runs
+as one principal: the store's tenant (`HEARTWOOD_TENANT`) plus
+`HEARTWOOD_MCP_PRINCIPAL_ID` (default `agent:mcp`), `HEARTWOOD_MCP_ROLES`
+(comma-separated), `HEARTWOOD_MCP_ATTRS` (comma-separated `key=value`) and
+`HEARTWOOD_MCP_CLEARANCE` (default `internal`). The connected client can read
+everything that principal can read, so give it only what the client should see.
+A tool call that sends `tenant`, `principal_id`, `roles`, `attrs`, `clearance`,
+`created_by`, `actor`, or any argument the tool does not declare is rejected with
+an error. Code that embeds the server can pass `build_server(db, principal=...)`
+instead of using the environment variables.
+
 ### Codex local stdio
 
 Codex can use the same MCP server over local stdio today. Start with the safe

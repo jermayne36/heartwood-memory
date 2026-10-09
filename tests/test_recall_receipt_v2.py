@@ -401,7 +401,7 @@ def test_writer_has_no_v1_switch(receipted, monkeypatch):
 @pytest.mark.parametrize("subject", ["", "subject:hidden"])
 def test_registered_mcp_tools_differential(receipted, subject):
     db, _, _, _ = receipted
-    server, _db, _backend = build_server(db)
+    server, _db, _backend = build_server(db, principal=Principal("fixture:reader", db.tenant))
 
     def call(name, arguments):
         output = asyncio.run(server.call_tool(name, arguments))
@@ -412,8 +412,7 @@ def test_registered_mcp_tools_differential(receipted, subject):
         return json.loads(output[0].text)
 
     def observe():
-        response = call("recall", {"cue": "Recall evidence", "subject": subject,
-                                   "principal_id": "fixture:reader", "k": 2})
+        response = call("recall", {"cue": "Recall evidence", "subject": subject, "k": 2})
         assert response["receipt"]["schema"] == RECALL_SCHEMA
         explanation = call("explain_recall", {"recall_id": response["recall_id"]})
         assert "denied" not in json.dumps([response, explanation]).lower()
