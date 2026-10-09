@@ -157,6 +157,25 @@ Governance you can inspect and re-run at the record level:
 | **Key-destruction receipt** | `forget(mode="hard")` destroys the per-subject key and purges derived artifacts. | Reports per-subject key destruction and purge counts; it does not prove byte-level content deletion. |
 | **Faithfulness + egress gate** | Generated memories fail closed unless they pass a faithfulness check; rejected egress requests block the external-model call. | Unaccepted faithfulness results are blocked by default; `store_unaccepted=True` stores a `generated_needs_review` proposal, which typed ranking downweights. |
 
+## Replacing a memory
+
+From 0.2.10, when a new memory names the memory it replaces, or a file is
+edited or deleted through the memory tool, Heartwood's default recall stops
+returning the old text, including after a restart. Earlier versions of an
+edited file stay reachable only when history is asked for explicitly.
+
+> **Limit.** Heartwood does not detect replacements by itself: if a new memory
+> is written without naming what it replaces, both stay current and the old one
+> can still be recalled.
+
+To name it, pass the old memory's id when you write the new one:
+`db.remember(..., supersedes=old_id)`. History stays reachable with
+`filters={"include_review_states": ["superseded"]}` until `forget()` erases the
+subject. A memory-tool file written by an older release keeps its earlier
+versions in default recall until its next edit, rename or delete; see
+"Existing data" in the [0.2.10 changelog](CHANGELOG.md#0210---2026-10-09).
+Details: [Recall visibility and retirement](docs/api/recall-visibility-and-retirement.md).
+
 ## Key docs
 
 - [MCP quickstart](docs/integrations/mcp-quickstart.md)
