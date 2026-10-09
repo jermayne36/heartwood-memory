@@ -7,11 +7,12 @@ tool itself does not provide:
 
   - every write is provenance-signed and audited (who/when/model);
   - edits create immutable, version-linked memories (supersedes chain) — a real
-    edit history, not a silent overwrite;
+    edit history, not a silent overwrite. The earlier version moves to review
+    state `superseded`, so default recall returns only the current text;
   - files are policy-tagged (tenant/classification) and semantically indexed, so
     Heartwood `recall()` works across all memory-tool files;
-  - delete physically purges the file's derived artifacts; full erasure
-    (forget(subject)) crypto-shreds.
+  - delete physically purges the file's current version and retires its earlier
+    versions from default recall; full erasure (forget(subject)) crypto-shreds.
 
 Wire it to the Anthropic SDK by subclassing `BetaAbstractMemoryTool` and routing
 its abstract methods to `handle({...})`, or call `handle()` directly from your own
@@ -22,6 +23,7 @@ from __future__ import annotations
 import posixpath
 
 from ..envelope import Policy
+from ..review import DEFAULT_HIDDEN_REVIEW_STATES, ReviewState
 
 ROOT = "/memories"
 
@@ -68,13 +70,22 @@ class MemoryToolBackend:
 
     With `principal`, the backend acts as that principal: it lists, reads and
     edits only files whose current version the principal can read, cannot create
-    or rename over a file it cannot read, and authors writes as the principal
-    unless `created_by` says otherwise. Without one it sees every file in the
-    tenant, for trusted in-process callers. The path index is built once, when
-    the backend is constructed."""
+    or rename over a file it cannot read, and authors writes as the principal.
+    Without one it sees every file in the tenant, for trusted in-process callers.
+    The path index is built once, when the backend is constructed.
+
+    An edit or rename supersedes every earlier version of the file the principal
+    can read, in the same write, under the rules of `remember(supersedes=...)`:
+    it is refused when one of them is another principal's (or approved) and the
+    principal lacks the reviewer (or approver) role. A delete purges the current
+    version and supersedes the earlier ones the same way. A superseded version is
+    history, never the file: it is not listed or read, and does not come back
+    after a restart."""
 
     def __init__(self, db, *, created_by=None, subject="memory-tool-user",
                  classification="internal", model_version="memory-tool", principal=None):
+        if principal is not None and created_by is not None and created_by != principal.id:
+            raise ValueError("created_by must equal principal.id when principal is given")
         self.db = db
         self.principal = principal
         self.created_by = created_by or (principal.id if principal is not None else "agent:memory")
@@ -140,7 +151,7 @@ class MemoryToolBackend:
         return "\n".join(lines)
 
     def _create(self, path: str, file_text: str) -> str:
-        if path in self.index:
+        if self._taken(path):
             return f"Error: File {path} already exists"
         mem_id = self.db.remember(
             file_text, subject=self.subject, created_by=self.created_by, kind="working",
@@ -161,7 +172,9 @@ class MemoryToolBackend:
             return (f"No replacement was performed. Multiple occurrences of old_str `{old_str}` "
                     f"in lines: {', '.join(lines)}. Please ensure it is unique")
         new_content = content.replace(old_str, new_str, 1)
-        self._new_version(path, new_content)
+        refused = self._new_version(path, new_content)
+        if refused:
+            return refused
         return "The memory file has been edited.\n" + _numbered(new_content)
 
     def _insert(self, path: str, insert_line: int, insert_text: str) -> str:
@@ -173,7 +186,9 @@ class MemoryToolBackend:
             return (f"Error: Invalid `insert_line` parameter: {insert_line}. It should be within "
                     f"the range of lines of the file: [0, {len(lines)}]")
         lines.insert(insert_line, insert_text.rstrip("\n"))
-        self._new_version(path, "\n".join(lines))
+        refused = self._new_version(path, "\n".join(lines))
+        if refused:
+            return refused
         return f"The file {path} has been edited."
 
     def _delete(self, path: str) -> str:
@@ -181,6 +196,14 @@ class MemoryToolBackend:
                    if (p == path or p.startswith(path.rstrip("/") + "/")) and self._current(p)]
         if not targets:
             return f"Error: The path {path} does not exist"
+        earlier = self._earlier_versions(*targets)
+        if earlier:
+            # Retired before anything is purged, so a refusal deletes nothing.
+            try:
+                self.db.supersede(earlier, actor=self.created_by, principal=self.principal,
+                                  reason="memory tool delete")
+            except (KeyError, PermissionError, RuntimeError, ValueError) as exc:
+                return self._refused(path, "deleted", exc)
         for p in targets:
             self.db.purge(self.index.pop(p), actor=self.created_by)
         return f"Successfully deleted {path}"
@@ -188,15 +211,19 @@ class MemoryToolBackend:
     def _rename(self, old_path: str, new_path: str) -> str:
         if not self._current(old_path):
             return f"Error: The path {old_path} does not exist"
-        if new_path in self.index:
+        if self._taken(new_path):
             return f"Error: The destination {new_path} already exists"
         content = self.db.read_content(self.index[old_path]) or ""
         # new governed memory at the new path; supersedes the old (provenance chain)
         old_id = self.index[old_path]
-        new_id = self.db.remember(
-            content, subject=self.subject, created_by=self.created_by, kind="working",
-            epistemic="model-generated", source={"kind": "memfile", "uri": new_path},
-            policy=self.policy, model_version=self.model_version, derived_from=[old_id])
+        try:
+            new_id = self.db.remember(
+                content, subject=self.subject, created_by=self.created_by, kind="working",
+                epistemic="model-generated", source={"kind": "memfile", "uri": new_path},
+                policy=self.policy, model_version=self.model_version, derived_from=[old_id],
+                supersedes=[old_id, *self._earlier_versions(old_path)], principal=self.principal)
+        except (KeyError, PermissionError, RuntimeError, ValueError) as exc:
+            return self._refused(old_path, "renamed", exc)
         self.db.add_provenance_edge(new_id, old_id, "supersedes")
         self.db.purge(old_id, actor=self.created_by)
         del self.index[old_path]
@@ -214,23 +241,67 @@ class MemoryToolBackend:
         mem_id = self.index.get(path)
         if mem_id is None:
             return None
+        meta = self.db.store.get_meta(mem_id)
+        # @fail-closed(memory-tool-superseded): the newest version of a deleted file
+        # is superseded history; it does not bring the file back.
+        if meta is not None and meta.get("review_state") == ReviewState.SUPERSEDED.value:
+            return None
         # @fail-closed(memory-tool-principal): a path whose current version the
         # principal cannot read is neither listed, read nor edited; an older readable
         # version does not reopen it.
-        if self.principal is not None and not self.db.can_read(
-            self.principal, self.db.store.get_meta(mem_id)
-        ):
+        if self.principal is not None and not self.db.can_read(self.principal, meta):
             return None
         return mem_id
 
-    def _new_version(self, path: str, new_content: str):
+    def _taken(self, path: str) -> bool:
+        """Whether `path` holds a file, readable or not. A path whose newest version
+        is superseded was deleted and may be reused."""
+        mem_id = self.index.get(path)
+        if mem_id is None:
+            return False
+        meta = self.db.store.get_meta(mem_id)
+        return meta is None or meta.get("review_state") != ReviewState.SUPERSEDED.value
+
+    def _earlier_versions(self, *paths: str) -> list[str]:
+        """Earlier versions of `paths` that default recall still returns and this
+        backend's principal can read. Versions written before edits superseded
+        them stay current until the file is next edited, renamed or deleted."""
+        current = {self.index.get(path) for path in paths}
+        earlier = []
+        for meta in self.db.store.candidate_meta(self.db.tenant):
+            source = meta.get("source") or {}
+            if source.get("kind") != "memfile" or source.get("uri") not in paths or meta["id"] in current:
+                continue
+            if meta.get("review_state") in DEFAULT_HIDDEN_REVIEW_STATES:
+                continue
+            if self.principal is not None and not self.db.can_read(self.principal, meta):
+                continue
+            earlier.append(meta["id"])
+        return earlier
+
+    def _new_version(self, path: str, new_content: str) -> str | None:
+        """Write the edited file as a new version that supersedes the old ones.
+        Returns an error string if the edit is refused; nothing is written then."""
         old_id = self.index[path]
-        new_id = self.db.remember(
-            new_content, subject=self.subject, created_by=self.created_by, kind="working",
-            epistemic="model-generated", source={"kind": "memfile", "uri": path},
-            policy=self.policy, model_version=self.model_version, derived_from=[old_id])
+        try:
+            new_id = self.db.remember(
+                new_content, subject=self.subject, created_by=self.created_by, kind="working",
+                epistemic="model-generated", source={"kind": "memfile", "uri": path},
+                policy=self.policy, model_version=self.model_version, derived_from=[old_id],
+                supersedes=[old_id, *self._earlier_versions(path)], principal=self.principal)
+        except (KeyError, PermissionError, RuntimeError, ValueError) as exc:
+            return self._refused(path, "edited", exc)
         self.db.add_provenance_edge(new_id, old_id, "supersedes")
-        self.index[path] = new_id   # old version retained as immutable history
+        self.index[path] = new_id   # old versions retained as superseded history
+        return None
+
+    @staticmethod
+    def _refused(path: str, verb: str, exc: Exception) -> str:
+        # Role and transition refusals name no record; the others could carry an
+        # id, so they get a fixed message.
+        if isinstance(exc, (PermissionError, ValueError)):
+            return f"Error: {path} was not {verb}: {exc}"
+        return f"Error: {path} changed while it was being {verb}. View it and try again."
 
     def _rebuild_index(self):
         latest: dict[str, float] = {}

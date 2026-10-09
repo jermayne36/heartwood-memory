@@ -17,20 +17,36 @@ The Claude memory tool is a client-side, filesystem-like tool over `/memories`.
 can't:
 
 - **Version history** — every edit is a new immutable memory linked by a
-  `supersedes` provenance edge (not a silent overwrite).
+  `supersedes` provenance edge (not a silent overwrite). The same write moves
+  every earlier version of the file to `review_state = "superseded"`, so default
+  `db.recall()` returns only the current text; `filters={"include_review_states":
+  ["superseded"]}` still reaches the history. `rename` does the same for the old
+  path.
 - **Provenance + audit** — every write is signed and recorded in the hash-chained
   audit log (who/when/model).
 - **Policy tags** — files carry tenant/classification and are policy-enforced if
   also recalled via `db.recall()`.
 - **Semantic recall** — memory-tool files are embedded, so `db.recall()` searches
   across them (the raw tool can't).
-- **Erasure** — `delete` purges a file's derived artifacts; `db.forget(subject)`
-  crypto-shreds everything for that subject (GDPR Art.17).
+- **Delete and erasure** — `delete` purges the file's current version (its row,
+  embedding and index entry) and moves any earlier version still current to
+  `superseded`. Default recall then returns nothing from that file, and the file
+  does not come back when the backend restarts. `delete` does not destroy the
+  earlier versions: they stay readable through
+  `filters={"include_review_states": ["superseded"]}` until
+  `db.forget(subject)` crypto-shreds everything for the subject they were written
+  under (GDPR Art.17). Use `forget` when the old text itself must not persist.
 - **Path-traversal guard** — confined to `/memories` (per the docs' MUST).
 - **Principal scope** — pass `principal=Principal(...)` and the backend acts as
   that principal: it lists, reads and edits only files whose current version the
   principal can read, cannot create or rename over one it cannot, and signs its
-  writes as the principal. Without `principal` it sees every file in the tenant.
+  writes as the principal (a different `created_by` is refused). Retiring earlier
+  versions follows the rules of `remember(supersedes=...)`: an edit, rename or
+  delete that would retire another principal's version, or an approved one, is
+  refused unless the principal holds the `reviewer` (or `approver`) role. The
+  current version that `delete` purges is not checked this way: the principal may
+  delete any file it can read, as before. A version the principal cannot read is
+  left as it is. Without `principal` the backend sees every file in the tenant.
 
 ```python
 from heartwood import Heartwood
@@ -104,7 +120,11 @@ Every read-capable tool stays inside that principal:
   the principal can read, and writes as the principal. It cannot create or rename
   over a file it cannot read; it is told only that the path exists. The file
   index is built when the server starts, so a file another process writes later
-  is not seen until restart: run one `memory` writer per store.
+  is not seen until restart: run one `memory` writer per store. An edit retires
+  the file's earlier versions and a delete leaves nothing from the file in
+  default recall (section 1). Retiring another principal's version needs the
+  `reviewer` role, so editing or renaming another principal's file does too;
+  `delete` still purges the current version of any file the principal can read.
 - `remember` writes as the principal. Heartwood does not detect that a memory
   replaces an older one; the client says so with `supersedes` (one id or a list),
   and the listed memories leave default recall in the same audited step. Each must
@@ -114,7 +134,8 @@ Every read-capable tool stays inside that principal:
 - `evaluate_egress` and `assess_faithfulness` resolve a cited memory's stored
   text only when the principal can read that memory. An encrypted span must also
   carry its `content_hash`, so knowing a memory id is not enough to read the text
-  quoted inside it.
+  quoted inside it. A span whose text is read from a stored memory is classified
+  at least as strictly as that memory, whatever label the request gives it.
 
 `forget` is the exception: it erases a whole subject, including memories the
 principal cannot read, so expose it only to a client trusted with erasure.

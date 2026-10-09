@@ -161,24 +161,9 @@ class Store:
         try:
             self.conn.execute("BEGIN IMMEDIATE")
             self._insert_memory_row(m, content_enc, emb)
-            for target in superseded:
-                expected = target["expected"]
-                cur = self.conn.execute(
-                    "UPDATE memories SET review_state='superseded' "
-                    "WHERE id=? AND tenant=? AND review_state IS ? AND epistemic IS ? "
-                    "AND created_by IS ? AND content_hash IS ?",
-                    (
-                        target["id"],
-                        tenant,
-                        expected["review_state"],
-                        expected["epistemic"],
-                        expected["created_by"],
-                        expected["content_hash"],
-                    ),
-                )
-                if cur.rowcount != 1:
-                    self.conn.rollback()
-                    return None
+            if not self._supersede_rows(tenant, superseded):
+                self.conn.rollback()
+                return None
             for parent in derived_from:
                 self.conn.execute(
                     "INSERT OR IGNORE INTO prov_edges VALUES (?,?,?)",
@@ -197,6 +182,56 @@ class Store:
         except Exception:
             self.conn.rollback()
             raise
+
+    def supersede_audited(
+        self,
+        tenant: str,
+        superseded: list[dict],
+        *,
+        principal: str,
+        audit_bodies: list[str],
+    ) -> list[dict] | None:
+        """Supersede rows without writing a replacement, auditing each, in one transaction.
+
+        Same compare-and-swap as ``insert_memory_superseding``: if any row no
+        longer matches its ``expected`` values, nothing is written and None is
+        returned. ``audit_bodies[i]`` is the ``supersede`` row for ``superseded[i]``.
+        """
+        try:
+            self.conn.execute("BEGIN IMMEDIATE")
+            if not self._supersede_rows(tenant, superseded):
+                self.conn.rollback()
+                return None
+            transitions = [
+                self.append_audit_in_transaction(tenant, principal, "supersede", target["id"], body)
+                for target, body in zip(superseded, audit_bodies, strict=True)
+            ]
+            self.conn.commit()
+            return transitions
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def _supersede_rows(self, tenant: str, superseded: list[dict]) -> bool:
+        """Move each row to ``superseded`` if it still matches; the caller owns the transaction."""
+        for target in superseded:
+            expected = target["expected"]
+            cur = self.conn.execute(
+                "UPDATE memories SET review_state='superseded' "
+                "WHERE id=? AND tenant=? AND review_state IS ? AND epistemic IS ? "
+                "AND created_by IS ? AND content_hash IS ?",
+                (
+                    target["id"],
+                    tenant,
+                    expected["review_state"],
+                    expected["epistemic"],
+                    expected["created_by"],
+                    expected["content_hash"],
+                ),
+            )
+            if cur.rowcount != 1:
+                return False
+        return True
 
     def _insert_memory_row(self, m: dict, content_enc: bytes, emb):
         emb_bytes = np.asarray(emb, dtype=np.float32).tobytes() if emb is not None else None

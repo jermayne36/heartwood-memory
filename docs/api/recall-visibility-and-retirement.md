@@ -112,7 +112,7 @@ can be put on the record after the fact.
 ### 3. Supersede it (preserves the row, terminal)
 
 Use this when a **newer record replaces this one** and the replacement is final.
-There are two ways in. Both move the record to `review_state = "superseded"`,
+There are three ways in. All move the record to `review_state = "superseded"`,
 which drops it out of default recall as a hidden review state. It stays
 recoverable with `include_review_states=["superseded"]`. The row, its content, its
 provenance and its `indexed` flag are untouched. `superseded` is terminal: it has
@@ -169,7 +169,24 @@ db.transition_review(mem_id, "superseded", reviewer_principal, reason="replaced 
 Requires the `reviewer` or `approver` role, validates the transition against
 `LEGAL_TRANSITIONS` (`heartwood/review.py`), and writes a `review_transition`
 audit event. It applies only to records already in the review workflow; use 3a
-for a plain write.
+or 3c for a plain write.
+
+#### 3c. After the replacement already exists — `supersede`
+
+```python
+db.supersede([old_id], actor="agent:ops", reason="replaced by v2")
+```
+
+Retires the listed records without writing anything new, for when the
+replacement was written earlier or has itself been deleted. The rules are those
+of 3a: the same review-state transitions, and with `principal=` (`actor` must be
+its id) the same readability and authorship checks. Every retirement and its
+`supersede` audit row commit together; if any listed record changed after it was
+checked, nothing is written.
+
+The memory tool uses it on `delete`: the file's current version is purged, and
+earlier versions still current (written before edits superseded them) move to
+`superseded` instead of being destroyed.
 
 ### 4. Purge it — `db.purge` (destroys the row)
 
@@ -191,6 +208,7 @@ Each mechanism appends one row to the hash-chained audit log, so the question
 | `db.set_indexed` | `index_state` | `{"from": <prior indexed>, "to": <new>, "reason": ...}` |
 | `db.remember(..., supersedes=...)` | `remember` (target: the **new** record) | `{..., "supersedes": [{"id": <old id>, "from": <state>, "to": "superseded"}]}` |
 | `db.transition_review` | `review_transition` | `{"from": <state>, "to": <state>, "reason": ...}` |
+| `db.supersede` | `supersede` (one row per record) | `{"from": <state>, "to": "superseded", "reason": ...}` |
 | `db.purge` | `purge` | `{}` |
 
 ```python
@@ -212,6 +230,8 @@ Who may call each retirement verb, as of this release:
 | `db.transition_review` | role-bearing `Principal` (`reviewer` / `approver`) | yes |
 | `db.remember(..., supersedes=...)` with `principal=` | `Principal`; the MCP `remember` tool always passes the server's | only to retire another principal's record (`reviewer` / `approver`) or an approved one (`approver`) |
 | `db.remember(..., supersedes=...)` without `principal=` | `created_by` string | no |
+| `db.supersede` with `principal=` | `Principal` (`actor` must be its id) | as `remember(..., supersedes=...)` with `principal=` |
+| `db.supersede` without `principal=` | `actor` string | no |
 | `db.expire` | `actor` string | no |
 | `db.set_indexed` | `actor` string | no |
 | `db.purge` | `actor` string | no |
@@ -228,7 +248,13 @@ role. This is a deliberate, documented position, not an oversight:
   `supersedes`, are reachable only through MCP tools an operator names in
   `HEARTWOOD_MCP_ALLOWED_TOOLS`. There they run as the server's bound principal,
   never one the client chooses. `supersedes` is then limited as described in
-  [3a](#3a-in-the-write-that-replaces-it--remembersupersedes).
+  [3a](#3a-in-the-write-that-replaces-it--remembersupersedes). `supersede` is
+  reached over MCP only through the `memory` tool's `delete`, as that principal.
+- `expire`, `set_indexed`, `transition_review`, `supersede` and
+  `remember(..., supersedes=...)` act only inside the client's tenant: an id from
+  another tenant is refused with the same `KeyError("unknown memory id: ...")` as
+  an id that does not exist. `purge` does not check the tenant; pass it only ids
+  the client's own tenant returned.
 - Role-gating only the reversible, preservation-safe verbs (`expire`,
   `set_indexed`) while leaving the destructive ones (`forget`, `purge`) open
   would invert the risk gradient — gating the safe operations and not the

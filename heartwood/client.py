@@ -599,7 +599,8 @@ class Heartwood:
         source spans are sent to external model providers. With `principal`, a
         span's stored text is resolved only from memories that principal can
         read, an encrypted span must carry its content_hash, and the audit row
-        names the principal.
+        names the principal. A span whose text resolves from a stored memory is
+        classified at least as strictly as that memory, whatever its label.
         """
         decision = evaluate_egress_request(request, provider_registry, client=self, principal=principal)
         self.audit.append(
@@ -1316,7 +1317,7 @@ class Heartwood:
 
     def transition_review(self, mem_id, to_state, principal: Principal, reason=""):
         meta = self.store.get_meta(mem_id)
-        if not meta:
+        if not meta or meta["tenant"] != self.tenant:
             raise KeyError(f"unknown memory id: {mem_id}")
         from_state = meta.get("review_state")
         to_state = validate_transition(from_state, to_state, principal)
@@ -1329,6 +1330,51 @@ class Heartwood:
         self.audit.append(self.tenant, principal.id, "review_transition", mem_id,
                           {"from": from_state, "to": to_state, "reason": reason})
         return {"id": mem_id, "from": from_state, "to": to_state}
+
+    def supersede(self, supersedes, *, actor, principal: Principal | None = None, reason=""):
+        """Retire memories that newer ones replaced, without writing a new one.
+
+        Use it when the replacement already exists or has itself been deleted;
+        to write the replacement, ``remember(supersedes=...)`` does both in one
+        step. Each listed memory moves to review_state ``superseded`` under the
+        same rules as ``remember(supersedes=...)``: with ``principal`` (``actor``
+        must be its id), a memory it cannot read is refused like an unknown id,
+        and retiring another principal's memory needs the ``reviewer`` or
+        ``approver`` role (``approver`` for an approved one). Every retirement
+        and its ``supersede`` audit row commit together or not at all. Default
+        recall stops returning them; ``include_review_states=["superseded"]``
+        still reaches them.
+        """
+        if principal is not None and principal.id != actor:
+            raise ValueError("actor must equal principal.id when principal is given")
+        targets = self._superseded_targets(
+            supersedes, principal=principal, memory_id=None, writing_contract=False,
+        )
+        if not targets:
+            return []
+        changes = [
+            {"id": target["id"], "from": target["expected"]["review_state"],
+             "to": ReviewState.SUPERSEDED.value}
+            for target in targets
+        ]
+        # @fail-closed(supersede-atomic): every retirement and its audit row
+        # commit together or not at all.
+        transitions = self.store.supersede_audited(
+            self.tenant, targets, principal=actor,
+            audit_bodies=[
+                AuditLog.body(self.tenant, actor, "supersede", change["id"],
+                              {"from": change["from"], "to": change["to"], "reason": reason})
+                for change in changes
+            ],
+        )
+        if transitions is None:
+            raise RuntimeError(
+                "a superseded memory changed during supersede: "
+                + ", ".join(target["id"] for target in targets)
+            )
+        if self.audit.after_append is not None:
+            self.audit.after_append()
+        return changes
 
     def set_indexed(self, mem_id, indexed, *, actor, reason=""):
         """Retire a record from — or reinstate it into — recall, with an audit event.
@@ -1349,7 +1395,7 @@ class Heartwood:
         else:
             raise TypeError(f"indexed must be a bool (or 0/1), got {indexed!r}")
         meta = self.store.get_meta(mem_id)
-        if not meta:
+        if not meta or meta["tenant"] != self.tenant:
             raise KeyError(f"unknown memory id: {mem_id}")
         if (
             target
@@ -1391,7 +1437,7 @@ class Heartwood:
         audit event, so an out-of-band change can be recorded after the fact.
         """
         meta = self.store.get_meta(mem_id)
-        if not meta:
+        if not meta or meta["tenant"] != self.tenant:
             raise KeyError(f"unknown memory id: {mem_id}")
         if at is None:
             normalized = None
