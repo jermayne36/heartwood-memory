@@ -2,7 +2,9 @@
 
 This module does not claim a verified dependency on a specific OpenClaw package.
 It presents a representative Markdown-memory tool shape while storing content in
-Heartwood with policy, provenance, and erasure.
+Heartwood with policy, provenance, and erasure. Rewriting a path supersedes its
+earlier versions, so search returns only the current text; deleting a path purges
+its current version and supersedes the earlier ones.
 """
 from __future__ import annotations
 
@@ -12,6 +14,7 @@ from typing import Any
 from ..client import Heartwood
 from ..envelope import Policy
 from ..policy import Principal
+from ..review import DEFAULT_HIDDEN_REVIEW_STATES, ReviewState
 
 
 def _normalize_path(path: str) -> str:
@@ -57,6 +60,7 @@ class HeartwoodOpenClawMemoryRuntime:
             source={"kind": "openclaw-memory", "uri": norm},
             policy=Policy(classification=classification, roles=roles),
             model_version="openclaw-memory-runtime",
+            supersedes=self._live_versions(norm),
         )
         self.index[norm] = mem_id
         return mem_id
@@ -123,17 +127,33 @@ class HeartwoodOpenClawMemoryRuntime:
     def delete_path(self, path: str) -> dict[str, Any]:
         norm = _normalize_path(path)
         targets = [p for p in self.index if p == norm or p.startswith(norm.rstrip("/") + "/")]
+        current = {self.index[target] for target in targets}
+        # Earlier versions are retired before anything is purged.
+        earlier = [mem_id for mem_id in self._live_versions(*targets) if mem_id not in current]
+        self.db.supersede(earlier, actor=self.created_by, reason="openclaw delete")
         for target in targets:
             self.db.purge(self.index.pop(target), actor=self.created_by)
         return {"path": path, "deleted": len(targets)}
 
+    def _live_versions(self, *paths: str) -> list[str]:
+        """Versions of `paths` that default recall still returns."""
+        return [
+            meta["id"] for meta in self.db.store.candidate_meta(self.db.tenant)
+            if (meta.get("source") or {}).get("kind") == "openclaw-memory"
+            and (meta.get("source") or {}).get("uri") in paths
+            and meta.get("review_state") not in DEFAULT_HIDDEN_REVIEW_STATES
+        ]
+
     def _rebuild_index(self) -> None:
-        latest: dict[str, float] = {}
-        for row in self.db.store.candidates(self.db.tenant):
-            source = row.get("source") or {}
+        # A path whose newest version is superseded was deleted: it has no file.
+        latest: dict[str, dict] = {}
+        for meta in self.db.store.candidate_meta(self.db.tenant):
+            source = meta.get("source") or {}
             if source.get("kind") != "openclaw-memory":
                 continue
             uri = source.get("uri")
-            if uri and row["created_at"] >= latest.get(uri, -1):
-                latest[uri] = row["created_at"]
-                self.index[uri] = row["id"]
+            if uri and meta["created_at"] >= latest.get(uri, meta)["created_at"]:
+                latest[uri] = meta
+        for uri, meta in latest.items():
+            if meta.get("review_state") != ReviewState.SUPERSEDED.value:
+                self.index[uri] = meta["id"]

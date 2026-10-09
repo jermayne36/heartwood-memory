@@ -186,14 +186,18 @@ checked, nothing is written.
 
 The memory tool uses it on `delete`: the file's current version is purged, and
 earlier versions still current (written before edits superseded them) move to
-`superseded` instead of being destroyed.
+`superseded` instead of being destroyed. With a principal, purging the current
+version follows the same readability and authorship checks, and a refusal
+changes nothing.
 
 ### 4. Purge it — `db.purge` (destroys the row)
 
 `db.purge(mem_id)` physically deletes the row and removes it from the index
 (`heartwood/client.py`). It appends a `purge` audit event, so the *deletion* is
 on the tamper-evident record — but the content is gone. It does not crypto-shred
-the subject key; that is reserved for `forget()`.
+the subject key; that is reserved for `forget()`. Another tenant's id is refused
+with `KeyError("unknown memory id: ...")` and nothing is deleted; an id that does
+not exist returns `False`.
 
 Use this only when the content itself must not persist.
 
@@ -235,6 +239,7 @@ Who may call each retirement verb, as of this release:
 | `db.expire` | `actor` string | no |
 | `db.set_indexed` | `actor` string | no |
 | `db.purge` | `actor` string | no |
+| memory tool `delete` with `principal=` (the MCP `memory` tool) | `Principal` | as `remember(..., supersedes=...)` with `principal=`, for the purged current version too |
 | `db.forget` | `actor` string | no |
 
 `expire`, `set_indexed`, `forget`, and `purge` take a free-text `actor` and are
@@ -242,19 +247,21 @@ not role-gated; `transition_review` and `approve` require a principal with a
 role. This is a deliberate, documented position, not an oversight:
 
 - The `actor` field is **audit attribution, not an authentication boundary.**
-  `expire`, `set_indexed` and `purge` are not reachable over the network: the
-  MCP/HTTP surface does not expose them, so they are in-process only, invoked by
-  code already trusted to open the store. `forget`, and `remember` with
+  `expire` and `set_indexed` are not reachable over the network: the MCP/HTTP
+  surface does not expose them, so they are in-process only, invoked by code
+  already trusted to open the store. `forget`, and `remember` with
   `supersedes`, are reachable only through MCP tools an operator names in
   `HEARTWOOD_MCP_ALLOWED_TOOLS`. There they run as the server's bound principal,
   never one the client chooses. `supersedes` is then limited as described in
-  [3a](#3a-in-the-write-that-replaces-it--remembersupersedes). `supersede` is
-  reached over MCP only through the `memory` tool's `delete`, as that principal.
-- `expire`, `set_indexed`, `transition_review`, `supersede` and
-  `remember(..., supersedes=...)` act only inside the client's tenant: an id from
-  another tenant is refused with the same `KeyError("unknown memory id: ...")` as
-  an id that does not exist. `purge` does not check the tenant; pass it only ids
-  the client's own tenant returned.
+  [3a](#3a-in-the-write-that-replaces-it--remembersupersedes). `supersede` and
+  `purge` are reached over MCP only through the `memory` tool's `delete` and
+  `rename`, as that principal and under the same limits.
+- `expire`, `set_indexed`, `transition_review`, `supersede`,
+  `remember(..., supersedes=...)`, `approve` and `purge` act only inside the
+  client's tenant: an id from another tenant is refused with the same
+  `KeyError("unknown memory id: ...")` as an id that does not exist (`purge`
+  returns `False` for an id that does not exist). The `heartwood purge` command
+  therefore needs the record's own `--tenant`.
 - Role-gating only the reversible, preservation-safe verbs (`expire`,
   `set_indexed`) while leaving the destructive ones (`forget`, `purge`) open
   would invert the risk gradient — gating the safe operations and not the

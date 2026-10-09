@@ -96,7 +96,7 @@ access. Details: `heartwood/adapters/README.md`, section "2. MCP server".
 | `forget` | Crypto-shred subject key and purge derived memories, including memories the principal cannot read |
 | `evaluate_egress` | Check source spans before external model egress; cited memories resolve only if the principal can read them, and a span read from a stored memory is classified at least as strictly as that memory |
 | `assess_faithfulness` | Check generated-memory claims against source spans the principal can read |
-| `memory` | Anthropic memory-tool-compatible `/memories` file surface over the files the principal can read. An edit retires the file's earlier versions in the same write, and after a delete default recall returns nothing from that file |
+| `memory` | Anthropic memory-tool-compatible `/memories` file surface over the files the principal can read. An edit retires the file's earlier versions in the same write, and after a delete default recall returns nothing from that file that the principal could read. Editing or deleting another principal's file needs the `reviewer` role (`approver` for an approved one) |
 | `health` | Readiness, warmed tenants, model names, and key-custody mode |
 
 ## Smoke Test
