@@ -59,7 +59,7 @@ _EXPORTS = {
 }
 
 __all__ = list(_EXPORTS)
-__version__ = "0.2.9"
+__version__ = "0.2.10"
 
 
 def __getattr__(name: str):

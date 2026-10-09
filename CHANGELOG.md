@@ -2,7 +2,7 @@
 
 All notable changes to `heartwood-memory` are documented here.
 
-## [Unreleased]
+## [0.2.10] - 2026-10-09
 
 ### Security
 - The MCP server binds the tenant and principal from its configuration (`HEARTWOOD_TENANT`, `HEARTWOOD_MCP_PRINCIPAL_ID`, `HEARTWOOD_MCP_ROLES`, `HEARTWOOD_MCP_ATTRS`, `HEARTWOOD_MCP_CLEARANCE`, or `build_server(principal=...)`). A tool call that sends `tenant`, `principal_id`, `roles`, `attrs`, `clearance`, `created_by`, `actor` or any undeclared argument is rejected. `memory`, `evaluate_egress` and `assess_faithfulness` read only what that principal can read, an encrypted source span must carry its `content_hash`, and `explain_recall` explains only the principal's own recalls.
