@@ -64,12 +64,19 @@ def _numbered(content: str, start: int = 1, end: int | None = None) -> str:
 
 class MemoryToolBackend:
     """Maps memory-tool commands onto a Heartwood instance. One backend per
-    (tenant, owner-subject). `subject` is the erasure unit for full forget()."""
+    (tenant, owner-subject). `subject` is the erasure unit for full forget().
 
-    def __init__(self, db, *, created_by="agent:memory", subject="memory-tool-user",
-                 classification="internal", model_version="memory-tool"):
+    With `principal`, the backend acts as that principal: it lists, reads and
+    edits only files whose current version the principal can read, cannot create
+    or rename over a file it cannot read, and authors writes as the principal
+    unless `created_by` says otherwise. Without one it sees every file in the
+    tenant, for trusted in-process callers."""
+
+    def __init__(self, db, *, created_by=None, subject="memory-tool-user",
+                 classification="internal", model_version="memory-tool", principal=None):
         self.db = db
-        self.created_by = created_by
+        self.principal = principal
+        self.created_by = created_by or (principal.id if principal is not None else "agent:memory")
         self.subject = subject
         self.policy = Policy(classification=classification, visibility="tenant")
         self.model_version = model_version
@@ -106,7 +113,7 @@ class MemoryToolBackend:
 
     # -- commands -------------------------------------------------------- #
     def _view(self, path: str, view_range=None) -> str:
-        if path in self.index:
+        if self._current(path):
             content = self.db.read_content(self.index[path]) or ""
             if view_range:
                 body = _numbered(content, int(view_range[0]), int(view_range[1]))
@@ -114,7 +121,8 @@ class MemoryToolBackend:
                 body = _numbered(content)
             return f"Here's the content of {path} with line numbers:\n{body}"
         # directory listing (path is a prefix)
-        children = sorted(p for p in self.index if p == path or p.startswith(path.rstrip("/") + "/"))
+        children = sorted(p for p in self.index
+                          if (p == path or p.startswith(path.rstrip("/") + "/")) and self._current(p))
         if not children and path != ROOT:
             return f"The path {path} does not exist. Please provide a valid path."
         lines = [f"Here're the files and directories up to 2 levels deep in {path}, "
@@ -141,7 +149,7 @@ class MemoryToolBackend:
         return f"File created successfully at: {path}"
 
     def _str_replace(self, path: str, old_str: str, new_str: str) -> str:
-        if path not in self.index:
+        if not self._current(path):
             return f"Error: The path {path} does not exist. Please provide a valid path."
         content = self.db.read_content(self.index[path]) or ""
         count = content.count(old_str)
@@ -156,7 +164,7 @@ class MemoryToolBackend:
         return "The memory file has been edited.\n" + _numbered(new_content)
 
     def _insert(self, path: str, insert_line: int, insert_text: str) -> str:
-        if path not in self.index:
+        if not self._current(path):
             return f"Error: The path {path} does not exist"
         content = self.db.read_content(self.index[path]) or ""
         lines = content.split("\n")
@@ -168,7 +176,8 @@ class MemoryToolBackend:
         return f"The file {path} has been edited."
 
     def _delete(self, path: str) -> str:
-        targets = [p for p in self.index if p == path or p.startswith(path.rstrip("/") + "/")]
+        targets = [p for p in self.index
+                   if (p == path or p.startswith(path.rstrip("/") + "/")) and self._current(p)]
         if not targets:
             return f"Error: The path {path} does not exist"
         for p in targets:
@@ -176,7 +185,7 @@ class MemoryToolBackend:
         return f"Successfully deleted {path}"
 
     def _rename(self, old_path: str, new_path: str) -> str:
-        if old_path not in self.index:
+        if not self._current(old_path):
             return f"Error: The path {old_path} does not exist"
         if new_path in self.index:
             return f"Error: The destination {new_path} already exists"
@@ -194,6 +203,25 @@ class MemoryToolBackend:
         return f"Successfully renamed {old_path} to {new_path}"
 
     # -- helpers --------------------------------------------------------- #
+    def _current(self, path: str) -> str | None:
+        """The path's current memory id, if this backend's principal can read it.
+
+        The index keeps every path in the tenant, so create and rename still see
+        an unreadable path as taken and cannot shadow it with a newer version.
+        Every read and edit goes through here instead.
+        """
+        mem_id = self.index.get(path)
+        if mem_id is None:
+            return None
+        # @fail-closed(memory-tool-principal): a path whose current version the
+        # principal cannot read is neither listed, read nor edited; an older readable
+        # version does not reopen it.
+        if self.principal is not None and not self.db.can_read(
+            self.principal, self.db.store.get_meta(mem_id)
+        ):
+            return None
+        return mem_id
+
     def _new_version(self, path: str, new_content: str):
         old_id = self.index[path]
         new_id = self.db.remember(

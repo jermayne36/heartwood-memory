@@ -57,8 +57,13 @@ def split_source_span_texts(
     return tuple(stored_spans), tuple(encrypted_texts)
 
 
-def resolve_source_span_text(span: dict[str, Any], client=None) -> str | None:
-    """Resolve inline, self-referenced, or encrypted span text."""
+def resolve_source_span_text(span: dict[str, Any], client=None, *, principal=None) -> str | None:
+    """Resolve inline, self-referenced, or encrypted span text.
+
+    With `principal`, stored text resolves only from a memory that principal can
+    read, and an encrypted span must name its content_hash: holding a memory id
+    is not enough to read the text quoted inside that memory.
+    """
     text = span.get("text")
     if isinstance(text, str):
         return text
@@ -67,6 +72,13 @@ def resolve_source_span_text(span: dict[str, Any], client=None) -> str | None:
     memory_id = span.get("memory_id")
     if not memory_id:
         return None
+    if principal is not None:
+        # @fail-closed(span-principal-read): a hidden or unknown memory resolves to
+        # nothing, the same as a hash mismatch, so the result is no existence oracle.
+        if not client.can_read(principal, client.store.get_meta(str(memory_id))):
+            return None
+        if span.get("text_ref") == "encrypted" and not span.get("content_hash"):
+            return None
     if span.get("text_ref") == "self":
         meta = client.store.get_meta(str(memory_id))
         if not meta or span.get("content_hash") != meta.get("content_hash"):

@@ -222,9 +222,10 @@ def evaluate_candidate(
     review_threshold: float = 0.45,
     *,
     client=None,
+    principal=None,
 ) -> dict[str, Any]:
     spans = {
-        span["span_id"]: resolve_source_span_text(span, client) or ""
+        span["span_id"]: resolve_source_span_text(span, client, principal=principal) or ""
         for span in candidate.get("source_spans", [])
     }
     evaluated_claims = [

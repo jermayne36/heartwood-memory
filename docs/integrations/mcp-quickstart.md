@@ -46,12 +46,13 @@ is omitted, the server still fails closed to the same subset.
 
 The server is fail-closed: when `HEARTWOOD_MCP_ALLOWED_TOOLS` is unset, only the
 read-only subset (`recall`, `explain_recall`, `health`) is exposed. The write verb
-`remember`, the `/memories` file verb `memory`, and the destructive `forget`
-(crypto-shred erasure) are NOT exposed by default — name them explicitly to opt in.
+`remember`, the `/memories` file verb `memory`, the destructive `forget`
+(crypto-shred erasure), and the source-text tools `evaluate_egress` and
+`assess_faithfulness` are NOT exposed by default — name them explicitly to opt in.
 
 To expose write or erasure tools, set a comma-separated allowlist that includes
-them. The server logs a stderr warning whenever a mutating or destructive verb is
-exposed, so an unintended `forget` is visible in logs:
+them. The server logs a stderr warning whenever a mutating, destructive or
+source-text verb is exposed, so an unintended `forget` is visible in logs:
 
 ```json
 {
@@ -73,17 +74,29 @@ Valid tool names are `remember`, `recall`, `explain_recall`, `forget`,
 `evaluate_egress`, `assess_faithfulness`, `memory`, and `health`. Unknown names
 fail closed at server startup.
 
+## Identity
+
+The server, not the client, decides who a tool call runs as. Every call runs as
+one principal: the store's tenant (`HEARTWOOD_TENANT`) plus
+`HEARTWOOD_MCP_PRINCIPAL_ID` (default `agent:mcp`), `HEARTWOOD_MCP_ROLES`
+(comma-separated), `HEARTWOOD_MCP_ATTRS` (comma-separated `key=value`) and
+`HEARTWOOD_MCP_CLEARANCE` (default `internal`). A call that sends `tenant`,
+`principal_id`, `roles`, `attrs`, `clearance`, `created_by` or `actor` is rejected.
+Every tool except `forget` reads only what that principal can read; `forget`
+erases a whole subject. Run one server per principal that needs different
+access. Details: `heartwood/adapters/README.md`, section "2. MCP server".
+
 ## Tools
 
 | Tool | Purpose |
 |---|---|
-| `remember` | Tenant-aware governed write with classification, roles, attrs, source IDs, provenance signing, audit, encryption, and indexing |
+| `remember` | Governed write as the server's principal, with classification, PII flag, source URI, provenance signing, audit, encryption, and indexing |
 | `recall` | Policy-enforced recall; denied memories are not returned, or counted in the results or the receipt |
 | `explain_recall` | Ranking/freshness explanation without denied-candidate side channels |
-| `forget` | Crypto-shred subject key and purge derived memories |
-| `evaluate_egress` | Check source spans before external model egress |
-| `assess_faithfulness` | Check generated-memory claims against source spans |
-| `memory` | Anthropic memory-tool-compatible `/memories` file surface backed by Heartwood |
+| `forget` | Crypto-shred subject key and purge derived memories, including memories the principal cannot read |
+| `evaluate_egress` | Check source spans before external model egress; cited memories resolve only if the principal can read them |
+| `assess_faithfulness` | Check generated-memory claims against source spans the principal can read |
+| `memory` | Anthropic memory-tool-compatible `/memories` file surface over the files the principal can read |
 | `health` | Readiness, warmed tenants, model names, and key-custody mode |
 
 ## Smoke Test

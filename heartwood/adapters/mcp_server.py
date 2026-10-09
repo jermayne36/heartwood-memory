@@ -12,10 +12,17 @@ plus HEARTWOOD_MCP_PRINCIPAL_ID (default agent:mcp), HEARTWOOD_MCP_ROLES and
 HEARTWOOD_MCP_ATTRS (comma-separated; key=value for attrs; default none) and
 HEARTWOOD_MCP_CLEARANCE (default internal). MCP clients cannot choose any of these: a
 tool call that sends tenant, principal_id, roles, attrs, clearance, created_by, actor,
-or any other argument the tool does not declare is rejected, not ignored.
+or any other argument the tool does not declare is rejected, not ignored. Reads stay
+inside that principal too: recall filters by its policy, explain_recall explains only
+its own recalls, memory lists, reads and edits only /memories files it can read, and
+evaluate_egress and assess_faithfulness resolve a cited memory's text only when it can
+read that memory.
+forget is the exception: it erases a whole subject, including memories the principal
+cannot read.
 Tool exposure is fail-closed: when HEARTWOOD_MCP_ALLOWED_TOOLS is unset the server
 exposes only the read-only subset (recall, explain_recall, health). The mutating and
-destructive verbs (remember, memory, forget) require explicit opt-in by naming them in
+destructive verbs (remember, memory, forget) and the source-text tools
+(evaluate_egress, assess_faithfulness) require explicit opt-in by naming them in
 HEARTWOOD_MCP_ALLOWED_TOOLS, e.g. HEARTWOOD_MCP_ALLOWED_TOOLS=recall,remember,forget.
 """
 from __future__ import annotations
@@ -71,6 +78,11 @@ DEFAULT_MCP_PRINCIPAL_ID = "agent:mcp"
 # per-subject key-destruction workflow (forget). These are NEVER in the default set —
 # an operator must name them explicitly in HEARTWOOD_MCP_ALLOWED_TOOLS to opt in.
 MUTATING_TOOL_NAMES = frozenset({"remember", "memory", "forget"})
+
+# Verbs that return or score the text of cited source spans. They resolve only spans in
+# memories the server's principal can read, but that text can be quoted material recall
+# never returns, so exposing them is an opt-in that is announced like the mutating verbs.
+SOURCE_TEXT_TOOL_NAMES = frozenset({"evaluate_egress", "assess_faithfulness"})
 
 
 def allowed_tools_from_env(value: str | None = None) -> set[str]:
@@ -167,38 +179,54 @@ def _register_tool(mcp, allowed: set[str] | None, declared: dict[str, frozenset[
 
 
 def _mutating_exposure_warning(allowed: set[str] | None) -> str | None:
-    """Fail-loud defense-in-depth: warn when mutating/destructive verbs are exposed.
+    """Fail-loud defense-in-depth: warn when mutating or source-text verbs are exposed.
 
     `allowed is None` means "no filter" (all tools); otherwise it is the resolved
-    allowlist. Returns the warning string when any mutating verb is exposed, else
-    None. The caller routes this to stderr — never stdout, which carries the MCP
-    JSON-RPC stream.
+    allowlist. Returns the warning string when any mutating or source-text verb is
+    exposed, else None. The caller routes this to stderr — never stdout, which
+    carries the MCP JSON-RPC stream.
     """
-    exposed = MUTATING_TOOL_NAMES if allowed is None else (set(allowed) & MUTATING_TOOL_NAMES)
+    announced = MUTATING_TOOL_NAMES | SOURCE_TEXT_TOOL_NAMES
+    exposed = announced if allowed is None else (set(allowed) & announced)
     if not exposed:
         return None
-    return (
-        "[heartwood-mcp] mutating MCP tools exposed: "
-        + ", ".join(sorted(exposed))
-        + " — 'forget' performs an irreversible per-subject key-destruction workflow. "
-        + "Restrict via HEARTWOOD_MCP_ALLOWED_TOOLS if this is unintended."
-    )
+    lines = []
+    mutating = exposed & MUTATING_TOOL_NAMES
+    if mutating:
+        lines.append(
+            "[heartwood-mcp] mutating MCP tools exposed: "
+            + ", ".join(sorted(mutating))
+            + " — 'forget' performs an irreversible per-subject key-destruction workflow."
+        )
+    source_text = exposed & SOURCE_TEXT_TOOL_NAMES
+    if source_text:
+        lines.append(
+            "[heartwood-mcp] source-text MCP tools exposed: "
+            + ", ".join(sorted(source_text))
+            + " — they return or score the text of cited spans in memories the server's "
+            + "principal can read."
+        )
+    lines.append("Restrict via HEARTWOOD_MCP_ALLOWED_TOOLS if this is unintended.")
+    return " ".join(lines)
 
 
 class MCPMemoryAPI:
     """Governed MCP-facing facade over one or more tenant-scoped clients.
 
     The tenant and identity arguments (tenant, principal_id, roles, attrs, clearance,
-    created_by, actor) are trusted: pass values from your own authentication, never
-    from an MCP client's tool arguments. build_server binds them from configuration.
+    created_by, actor, principal) are trusted: pass values from your own
+    authentication, never from an MCP client's tool arguments. build_server binds them
+    from configuration. memory, evaluate_egress and assess_faithfulness read past any
+    principal unless you pass `principal`.
     """
 
     def __init__(self, db: Heartwood, backend: MemoryToolBackend | None = None):
         self.root = db
         self.clients: dict[str, Heartwood] = {db.tenant: db}
-        self.backends: dict[str, MemoryToolBackend] = {}
+        # Keyed by (tenant, principal): a backend's file index is filtered for one principal.
+        self.backends: dict[tuple[str, Principal | None], MemoryToolBackend] = {}
         if backend is not None:
-            self.backends[db.tenant] = backend
+            self.backends[(db.tenant, backend.principal)] = backend
 
     def close(self) -> None:
         for tenant, client in list(self.clients.items()):
@@ -211,17 +239,20 @@ class MCPMemoryAPI:
             self.clients[tenant_id] = self.root.with_tenant(tenant_id)
         return self.clients[tenant_id]
 
-    def backend(self, tenant: str | None = None, *, created_by: str = "agent:mcp",
-                subject: str = "memory-tool-user", classification: str = "internal") -> MemoryToolBackend:
+    def backend(self, tenant: str | None = None, *, created_by: str | None = None,
+                subject: str = "memory-tool-user", classification: str = "internal",
+                principal: Principal | None = None) -> MemoryToolBackend:
         tenant_id = normalize_tenant(tenant, default=self.root.tenant)
-        if tenant_id not in self.backends:
-            self.backends[tenant_id] = MemoryToolBackend(
+        key = (tenant_id, principal)
+        if key not in self.backends:
+            self.backends[key] = MemoryToolBackend(
                 self.client(tenant_id),
-                created_by=created_by,
+                created_by=created_by or (principal.id if principal is not None else "agent:mcp"),
                 subject=subject,
                 classification=classification,
+                principal=principal,
             )
-        return self.backends[tenant_id]
+        return self.backends[key]
 
     def health(self) -> dict:
         return {
@@ -354,9 +385,12 @@ class MCPMemoryAPI:
             ],
         }
 
-    def explain_recall(self, recall_id: str, tenant: str | None = None) -> dict:
-        """Explain a recall without exposing denied candidate counts."""
-        explanation = dict(self.client(tenant).explain_recall(recall_id))
+    def explain_recall(self, recall_id: str, tenant: str | None = None,
+                       principal_id: str | None = None) -> dict:
+        """Explain a recall without exposing denied candidate counts.
+
+        With `principal_id`, only that principal's own recalls are explained."""
+        explanation = dict(self.client(tenant).explain_recall(recall_id, principal_id=principal_id))
         explanation.pop("denied", None)
         explanation.pop("denied_reasons", None)
         if isinstance(explanation.get("strict_dropped"), dict):
@@ -377,24 +411,25 @@ class MCPMemoryAPI:
         )
 
     def evaluate_egress(self, request: dict, provider_registry: dict | None = None,
-                        tenant: str | None = None) -> dict:
-        return self.client(tenant).evaluate_egress(request, provider_registry)
+                        tenant: str | None = None, principal: Principal | None = None) -> dict:
+        return self.client(tenant).evaluate_egress(request, provider_registry, principal=principal)
 
     def assess_faithfulness(self, candidate: dict, support_threshold: float = 0.72,
                             review_threshold: float = 0.45,
-                            tenant: str | None = None) -> dict:
+                            tenant: str | None = None, principal: Principal | None = None) -> dict:
         return self.client(tenant).assess_faithfulness(
             candidate,
             support_threshold=support_threshold,
             review_threshold=review_threshold,
+            principal=principal,
         )
 
     def memory(self, command: str, path: str = "", file_text: str = "", old_str: str = "",
                new_str: str = "", insert_line: int = 0, insert_text: str = "",
                old_path: str = "", new_path: str = "",
                view_range: list[int] | None = None, tenant: str | None = None,
-               created_by: str = "agent:mcp", subject: str = "memory-tool-user",
-               classification: str = "internal") -> str:
+               created_by: str | None = None, subject: str = "memory-tool-user",
+               classification: str = "internal", principal: Principal | None = None) -> str:
         cmd: dict[str, Any] = {"command": command}
         if path:
             cmd["path"] = path
@@ -413,6 +448,7 @@ class MCPMemoryAPI:
             created_by=created_by,
             subject=subject,
             classification=classification,
+            principal=principal,
         ).handle(cmd)
 
 
@@ -439,7 +475,11 @@ def build_server(db: Heartwood | None = None, backend: MemoryToolBackend | None 
         anchor_root_fingerprints=os.environ.get("HEARTWOOD_ANCHOR_ROOT_FINGERPRINT"),
     )
     principal = _bound_principal(db, principal)
-    backend = backend or MemoryToolBackend(db)
+    backend = backend or MemoryToolBackend(db, principal=principal)
+    # @fail-closed(mcp-principal-memory-backend): a memory backend built for another
+    # principal, or for none, would list and edit files past this server's principal.
+    if backend.principal is None or principal_from(backend.principal) != principal:
+        raise ValueError("MCP memory backend must be built with principal= the server's principal")
     api = MCPMemoryAPI(db, backend)
     declared_arguments: dict[str, frozenset[str]] = {}
 
@@ -462,6 +502,17 @@ def build_server(db: Heartwood | None = None, backend: MemoryToolBackend | None 
                 if error:
                     raise ToolError(error)
             return await super().call_tool(name, arguments)
+
+    def own_actor(tool: str, field: str, payload: dict) -> dict:
+        # @fail-closed(mcp-principal-actor): the audit row names the server's principal;
+        # a client-sent actor naming anyone else is refused, not silently replaced.
+        actor = payload.get("actor")
+        if actor is not None and actor != principal.id:
+            raise ToolError(
+                f"{tool}: {field}.actor cannot be set by an MCP client. This server records "
+                f"every call as its configured principal ({principal.id})."
+            )
+        return payload
 
     mcp = PrincipalBoundFastMCP(name)
     protocol_server = getattr(mcp, "_mcp_server", None)
@@ -507,7 +558,7 @@ def build_server(db: Heartwood | None = None, backend: MemoryToolBackend | None 
     @_register_tool(mcp, allowed_tools, declared_arguments)
     def explain_recall(recall_id: str) -> dict:
         """Why was this recalled? Candidates considered, ranking signals, freshness."""
-        return api.explain_recall(recall_id, tenant=principal.tenant)
+        return api.explain_recall(recall_id, tenant=principal.tenant, principal_id=principal.id)
 
     @_register_tool(mcp, allowed_tools, declared_arguments)
     def forget(subject: str, mode: str = "hard", reason: str = "", legal_basis: str = "") -> dict:
@@ -523,18 +574,24 @@ def build_server(db: Heartwood | None = None, backend: MemoryToolBackend | None 
 
     @_register_tool(mcp, allowed_tools, declared_arguments)
     def evaluate_egress(request: dict, provider_registry: dict | None = None) -> dict:
-        """Evaluate whether source spans may leave the deployment boundary before model use."""
-        return api.evaluate_egress(request, provider_registry, tenant=principal.tenant)
+        """Evaluate whether source spans may leave the deployment boundary before model use. Cited memories resolve only if this server's principal can read them."""
+        return api.evaluate_egress(
+            own_actor("evaluate_egress", "request", request),
+            provider_registry,
+            tenant=principal.tenant,
+            principal=principal,
+        )
 
     @_register_tool(mcp, allowed_tools, declared_arguments)
     def assess_faithfulness(candidate: dict, support_threshold: float = 0.72,
                             review_threshold: float = 0.45) -> dict:
-        """Evaluate generated-memory claims against cited source spans."""
+        """Evaluate generated-memory claims against cited source spans this server's principal can read."""
         return api.assess_faithfulness(
-            candidate,
+            own_actor("assess_faithfulness", "candidate", candidate),
             support_threshold=support_threshold,
             review_threshold=review_threshold,
             tenant=principal.tenant,
+            principal=principal,
         )
 
     @_register_tool(mcp, allowed_tools, declared_arguments)
@@ -542,7 +599,7 @@ def build_server(db: Heartwood | None = None, backend: MemoryToolBackend | None 
                new_str: str = "", insert_line: int = 0, insert_text: str = "",
                old_path: str = "", new_path: str = "",
                view_range: list[int] | None = None) -> str:
-        """Anthropic memory-tool-compatible ops over /memories, backed by governed Heartwood memories.
+        """Anthropic memory-tool-compatible ops over the /memories files this server's principal can read, backed by governed Heartwood memories.
         commands: view | create | str_replace | insert | delete | rename."""
         return api.memory(
             command,
@@ -556,6 +613,7 @@ def build_server(db: Heartwood | None = None, backend: MemoryToolBackend | None 
             new_path=new_path,
             view_range=view_range,
             tenant=principal.tenant,
+            principal=principal,
         )
 
     @_register_tool(mcp, allowed_tools, declared_arguments)
