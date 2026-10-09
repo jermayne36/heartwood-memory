@@ -106,6 +106,7 @@ def build_payload(
     labels_to_redact: set[str],
     *,
     client=None,
+    principal=None,
 ) -> list[dict[str, Any]]:
     payload: list[dict[str, Any]] = []
     for span in request.get("source_spans", []):
@@ -116,7 +117,7 @@ def build_payload(
                 "classification": span.get("classification", "internal"),
                 "pii_labels": sorted(labels),
                 "text": redact_text(
-                    resolve_source_span_text(span, client) or "",
+                    resolve_source_span_text(span, client, principal=principal) or "",
                     labels & labels_to_redact,
                 ),
             }
@@ -138,6 +139,7 @@ def evaluate_request(
     provider_registry: dict[str, Any] | None = None,
     *,
     client=None,
+    principal=None,
 ) -> dict[str, Any]:
     model = request["model"]
     policy = request["policy"]
@@ -213,7 +215,7 @@ def evaluate_request(
                 decision = EXTERNAL_REDACTED
                 labels_to_redact = pii_labels
                 reasons.append("source contains redactable PII; redaction required before egress")
-                payload = build_payload(request, labels_to_redact, client=client)
+                payload = build_payload(request, labels_to_redact, client=client, principal=principal)
             else:
                 decision = HUMAN_REVIEW
                 reasons.append("source contains PII that is not automatically redactable")
@@ -221,7 +223,7 @@ def evaluate_request(
         else:
             decision = EXTERNAL_ALLOWED
             reasons.append("external egress allowed by tenant and model policy")
-            payload = build_payload(request, labels_to_redact, client=client)
+            payload = build_payload(request, labels_to_redact, client=client, principal=principal)
 
     raw_pii_leaks = raw_pii_in_payload(payload)
     if decision == EXTERNAL_REDACTED and raw_pii_leaks:

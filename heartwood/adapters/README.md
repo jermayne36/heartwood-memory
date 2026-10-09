@@ -27,6 +27,10 @@ can't:
 - **Erasure** — `delete` purges a file's derived artifacts; `db.forget(subject)`
   crypto-shreds everything for that subject (GDPR Art.17).
 - **Path-traversal guard** — confined to `/memories` (per the docs' MUST).
+- **Principal scope** — pass `principal=Principal(...)` and the backend acts as
+  that principal: it lists, reads and edits only files whose current version the
+  principal can read, cannot create or rename over one it cannot, and signs its
+  writes as the principal. Without `principal` it sees every file in the tenant.
 
 ```python
 from heartwood import Heartwood
@@ -82,9 +86,41 @@ Use `python -c "import sys; print(sys.executable)"` inside the target virtual
 environment to get the absolute interpreter path. Tool exposure is fail-closed:
 when `HEARTWOOD_MCP_ALLOWED_TOOLS` is unset the server exposes only the read-only
 subset (`recall`, `explain_recall`, `health`). To expose the write/deletion verbs
-(`remember`, `memory`, `forget`), name them explicitly in
-`HEARTWOOD_MCP_ALLOWED_TOOLS`; the server logs a stderr warning whenever a
-destructive verb is exposed.
+(`remember`, `memory`, `forget`) or the source-text tools (`evaluate_egress`,
+`assess_faithfulness`), name them explicitly in `HEARTWOOD_MCP_ALLOWED_TOOLS`; the
+server logs a stderr warning whenever one of them is exposed.
+
+Identity is bound by the server, not chosen by the client. Every tool call runs
+as one principal: the store's tenant (`HEARTWOOD_TENANT`) plus
+`HEARTWOOD_MCP_PRINCIPAL_ID` (default `agent:mcp`), `HEARTWOOD_MCP_ROLES`
+(comma-separated), `HEARTWOOD_MCP_ATTRS` (comma-separated `key=value`) and
+`HEARTWOOD_MCP_CLEARANCE` (default `internal`). The connected client can read
+everything that principal can read, so give it only what the client should see.
+Every read-capable tool stays inside that principal:
+
+- `recall` returns only what its policy allows, and `explain_recall` explains
+  only this principal's own recalls.
+- `memory` lists, reads and edits only `/memories` files whose current version
+  the principal can read, and writes as the principal. It cannot create or rename
+  over a file it cannot read; it is told only that the path exists. The file
+  index is built when the server starts, so a file another process writes later
+  is not seen until restart: run one `memory` writer per store.
+- `evaluate_egress` and `assess_faithfulness` resolve a cited memory's stored
+  text only when the principal can read that memory. An encrypted span must also
+  carry its `content_hash`, so knowing a memory id is not enough to read the text
+  quoted inside it.
+
+`forget` is the exception: it erases a whole subject, including memories the
+principal cannot read, so expose it only to a client trusted with erasure.
+
+A tool call that sends `tenant`, `principal_id`, `roles`, `attrs`, `clearance`,
+`created_by`, `actor`, or any argument the tool does not declare is rejected with
+an error. So is an `actor` inside an `evaluate_egress` request or an
+`assess_faithfulness` candidate that names anyone other than the server's
+principal; the audit log records the server's principal. Code that embeds the
+server can pass `build_server(db, principal=...)` instead of using the
+environment variables; a `backend=` passed alongside must be a
+`MemoryToolBackend(db, principal=...)` for the same principal.
 
 ### Codex local stdio
 

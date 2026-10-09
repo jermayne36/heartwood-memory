@@ -14,6 +14,9 @@ the store or its contents.
   injects the demo's offline models and delegates to the standard adapter;
 - the absolute path to the isolated demo database;
 - tenant `tenant:rotation-continuity-demo`;
+- the principal the wrapper binds for every MCP call, `agent:rotation-continuity-demo`
+  with role `release-manager` and `confidential` clearance; VS Code cannot choose
+  another tenant, role or clearance;
 - the read-only MCP allowlist `recall,explain_recall,health`;
 - the VS Code workspace trust decision for this checked-in server definition.
 

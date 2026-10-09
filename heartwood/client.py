@@ -215,7 +215,7 @@ class Heartwood:
         )
         self.index = make_index(index, self.store)
         self.index.rebuild(self.store)   # populate from any pre-existing rows
-        self._explain: OrderedDict[str, dict] = OrderedDict()
+        self._explain: OrderedDict[str, tuple[str, dict]] = OrderedDict()
         self._text_cache: OrderedDict[str, tuple[str, str]] = OrderedDict()
         self._token_cache: OrderedDict[str, tuple[str, tuple[str, ...]]] = OrderedDict()
         self._bm25_corpus_cache: OrderedDict[tuple[str, ...], dict] = OrderedDict()
@@ -478,16 +478,20 @@ class Heartwood:
                            "indexed": indexed})
         return mem_id
 
-    def evaluate_egress(self, request: dict, provider_registry: dict | None = None) -> dict:
+    def evaluate_egress(self, request: dict, provider_registry: dict | None = None, *,
+                        principal: Principal | None = None) -> dict:
         """Evaluate whether source spans may leave the deployment boundary.
 
         This is the product API behind the Phase 0 egress gates. Call it before
-        source spans are sent to external model providers.
+        source spans are sent to external model providers. With `principal`, a
+        span's stored text is resolved only from memories that principal can
+        read, an encrypted span must carry its content_hash, and the audit row
+        names the principal.
         """
-        decision = evaluate_egress_request(request, provider_registry, client=self)
+        decision = evaluate_egress_request(request, provider_registry, client=self, principal=principal)
         self.audit.append(
             self.tenant,
-            request.get("actor", "agent:egress"),
+            principal.id if principal is not None else request.get("actor", "agent:egress"),
             "evaluate_egress",
             decision["request_id"],
             {
@@ -500,17 +504,22 @@ class Heartwood:
 
     def assess_faithfulness(self, candidate: dict, *,
                             support_threshold: float = 0.72,
-                            review_threshold: float = 0.45) -> dict:
-        """Evaluate generated-memory claims against cited source spans."""
+                            review_threshold: float = 0.45,
+                            principal: Principal | None = None) -> dict:
+        """Evaluate generated-memory claims against cited source spans.
+
+        `principal` limits stored span text as in evaluate_egress.
+        """
         assessment = evaluate_faithfulness_candidate(
             candidate,
             support_threshold=support_threshold,
             review_threshold=review_threshold,
             client=self,
+            principal=principal,
         )
         self.audit.append(
             self.tenant,
-            candidate.get("actor", "agent:faithfulness"),
+            principal.id if principal is not None else candidate.get("actor", "agent:faithfulness"),
             "assess_faithfulness",
             assessment["candidate_id"],
             {
@@ -914,7 +923,7 @@ class Heartwood:
         strict_reason_buckets = dict(
             Counter(item["reason"] for item in strict_failures)
         )
-        self._explain[recall_id] = {
+        self._explain[recall_id] = (principal.id, {
             "cue": cue, "candidates_considered": len(candidates),
             "visible": len(visible),
             "index_lag": lag,
@@ -943,7 +952,7 @@ class Heartwood:
                 if strict_exempt_ids and self._strict_cutover is not None
                 else None
             ),
-        }
+        })
         if len(self._explain) > 2000:
             self._explain.popitem(last=False)
         receipt = None
@@ -1027,8 +1036,15 @@ class Heartwood:
             "receipt_unavailable_reason": receipt_unavailable_reason,
         }
 
-    def explain_recall(self, recall_id: str) -> dict:
-        return self._explain.get(recall_id, {"error": "unknown recall_id"})
+    def explain_recall(self, recall_id: str, *, principal_id: str | None = None) -> dict:
+        """Explain a recall made by this client. With `principal_id`, a recall made
+        by another principal reads as unknown."""
+        owner, explanation = self._explain.get(recall_id, (None, None))
+        # @fail-closed(explain-recall-principal): an explanation carries the cue and
+        # result ids, so one principal never reads another's.
+        if explanation is None or (principal_id is not None and owner != principal_id):
+            return {"error": "unknown recall_id"}
+        return explanation
 
     def _cache_receipt(self, principal_id: str, recall_id: str, receipt: dict) -> None:
         key = (self.tenant, principal_id, recall_id)
@@ -1539,6 +1555,23 @@ class Heartwood:
             }
 
     # -- trusted internals (same-process adapters: e.g. memory-tool backend) --- #
+    def can_read(self, principal: Principal, meta: dict | None) -> bool:
+        """Whether `principal` may read the memory described by `meta`.
+
+        Applies the recall policy filter (tenant, clearance, roles, attributes,
+        private visibility) and, like read_content, keeps continuity-privileged
+        capability contracts out of reach. Adapters that decrypt on a
+        principal's behalf check this first.
+        """
+        if not meta:
+            return False
+        if (
+            meta.get("kind") == "capability-contract"
+            and meta.get("policy_scope") == "continuity-privileged"
+        ):
+            return False
+        return self.enforcer.visible(principal, meta)[0]
+
     def read_content(self, mem_id: str) -> str | None:
         """Decrypt a memory's content. Trusted, in-process callers only."""
         meta = self.store.get_meta(mem_id)

@@ -15,7 +15,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 from demo_models import EMBEDDER_NAME, RERANKER_NAME, embed, rerank  # noqa: E402
-from heartwood import Heartwood  # noqa: E402
+from heartwood import Heartwood, Principal  # noqa: E402
 from heartwood.adapters.mcp_server import build_server  # noqa: E402
 
 
@@ -31,9 +31,17 @@ def main() -> None:
         embedder=(embed, EMBEDDER_NAME),
         reranker=(rerank, RERANKER_NAME),
     )
+    # The IDE client recalls as the demo's release manager. MCP clients cannot
+    # choose their own tenant, roles or clearance; the server binds them here.
     mcp, _db, _backend = build_server(
         db=db,
         name="heartwood-rotation-continuity-demo",
+        principal=Principal(
+            id="agent:rotation-continuity-demo",
+            tenant=db.tenant,
+            roles=("release-manager",),
+            clearance="confidential",
+        ),
     )
     mcp.run()
 

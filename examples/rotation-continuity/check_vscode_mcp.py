@@ -66,9 +66,6 @@ async def run_check(args: argparse.Namespace) -> dict[str, Any]:
                     "recall",
                     {
                         "cue": "Project Juniper release decision security approval region",
-                        "principal_id": "agent:rotation-continuity-demo",
-                        "roles": ["release-manager"],
-                        "clearance": "confidential",
                         "subject": "project:juniper",
                         "k": 5,
                     },
