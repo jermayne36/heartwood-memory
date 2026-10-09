@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .envelope import CLASSIFICATION_RANK
 from .source_spans import resolve_source_span_text
 
 EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
@@ -94,11 +95,46 @@ def request_pii_labels(request: dict[str, Any]) -> set[str]:
     return labels
 
 
-def request_classifications(request: dict[str, Any]) -> set[str]:
-    return {
-        span.get("classification", "internal")
-        for span in request.get("source_spans", [])
-    }
+def _stored_classification(span: dict[str, Any], client, principal) -> str | None:
+    """The classification of the stored memory a span's text resolves from.
+
+    None for inline text, and for a memory the caller cannot read: that span
+    resolves to no text, and its label must not reveal the hidden memory's class.
+    """
+    if client is None or isinstance(span.get("text"), str):
+        return None
+    if span.get("text_ref") not in {"self", "encrypted"} or not span.get("memory_id"):
+        return None
+    meta = client.store.get_meta(str(span["memory_id"]))
+    if not meta or meta["tenant"] != client.tenant:
+        return None
+    if principal is not None and not client.can_read(principal, meta):
+        return None
+    return meta["classification"]
+
+
+def span_classifications(span: dict[str, Any], client=None, *, principal=None) -> set[str]:
+    """The classifications egress checks for one span.
+
+    The supplied label (default ``internal``) is raised to the stored memory's
+    classification when the span's text resolves from a memory the caller can
+    read, so an unlabelled span from a restricted memory is restricted. A label
+    the rank does not know is kept alongside the stored one.
+    """
+    supplied = span.get("classification", "internal")
+    stored = _stored_classification(span, client, principal)
+    if stored is None or stored == supplied:
+        return {supplied}
+    if supplied not in CLASSIFICATION_RANK:
+        return {supplied, stored}
+    return {max(supplied, stored, key=CLASSIFICATION_RANK.__getitem__)}
+
+
+def request_classifications(request: dict[str, Any], client=None, *, principal=None) -> set[str]:
+    classifications: set[str] = set()
+    for span in request.get("source_spans", []):
+        classifications |= span_classifications(span, client, principal=principal)
+    return classifications
 
 
 def build_payload(
@@ -111,10 +147,14 @@ def build_payload(
     payload: list[dict[str, Any]] = []
     for span in request.get("source_spans", []):
         labels = set(span.get("pii_labels", []))
+        classifications = span_classifications(span, client, principal=principal)
         payload.append(
             {
                 "span_id": span["span_id"],
-                "classification": span.get("classification", "internal"),
+                "classification": (
+                    classifications.pop() if len(classifications) == 1
+                    else span.get("classification", "internal")
+                ),
                 "pii_labels": sorted(labels),
                 "text": redact_text(
                     resolve_source_span_text(span, client, principal=principal) or "",
@@ -145,7 +185,7 @@ def evaluate_request(
     policy = request["policy"]
     provider_policy = resolve_provider_policy(model, provider_registry)
     pii_labels = request_pii_labels(request)
-    classifications = request_classifications(request)
+    classifications = request_classifications(request, client, principal=principal)
     reasons: list[str] = []
     labels_to_redact: set[str] = set()
 
