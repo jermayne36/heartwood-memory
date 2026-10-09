@@ -78,9 +78,10 @@ class MemoryToolBackend:
     can read, in the same write, under the rules of `remember(supersedes=...)`:
     it is refused when one of them is another principal's (or approved) and the
     principal lacks the reviewer (or approver) role. A delete purges the current
-    version and supersedes the earlier ones the same way. A superseded version is
-    history, never the file: it is not listed or read, and does not come back
-    after a restart."""
+    version and supersedes the earlier ones, and the same rule decides whether the
+    principal may purge the current version. A superseded version is history,
+    never the file: it is not listed or read, and does not come back after a
+    restart."""
 
     def __init__(self, db, *, created_by=None, subject="memory-tool-user",
                  classification="internal", model_version="memory-tool", principal=None):
@@ -93,6 +94,9 @@ class MemoryToolBackend:
         self.policy = Policy(classification=classification, visibility="tenant")
         self.model_version = model_version
         self.index: dict[str, str] = {}      # path -> current memory id
+        # Paths whose current version is older than a superseded one. Delete and
+        # rename retire that version instead of purging it (see _rebuild_index).
+        self._retire_only: set[str] = set()
         self._rebuild_index()
 
     TOOL_SPEC = {"type": "memory_20250818", "name": "memory"}
@@ -196,16 +200,29 @@ class MemoryToolBackend:
                    if (p == path or p.startswith(path.rstrip("/") + "/")) and self._current(p)]
         if not targets:
             return f"Error: The path {path} does not exist"
-        earlier = self._earlier_versions(*targets)
-        if earlier:
-            # Retired before anything is purged, so a refusal deletes nothing.
-            try:
-                self.db.supersede(earlier, actor=self.created_by, principal=self.principal,
+        purged = [p for p in targets if p not in self._retire_only]
+        retired = [self.index[p] for p in targets if p in self._retire_only]
+        retired += self._earlier_versions(*targets)
+        # Every check and retirement happens before anything is purged, so a
+        # refusal deletes nothing.
+        try:
+            if self.principal is not None:
+                # @fail-closed(memory-tool-delete-principal): purging a version needs
+                # the authorship or role that superseding it does.
+                for p in purged:
+                    mem_id = self.index[p]
+                    self.db._authorize_retirement(mem_id, self.db.store.get_meta(mem_id),
+                                                  self.principal, verb="deleting")
+            if retired:
+                self.db.supersede(retired, actor=self.created_by, principal=self.principal,
                                   reason="memory tool delete")
-            except (KeyError, PermissionError, RuntimeError, ValueError) as exc:
-                return self._refused(path, "deleted", exc)
+        except (KeyError, PermissionError, RuntimeError, ValueError) as exc:
+            return self._refused(path, "deleted", exc)
         for p in targets:
-            self.db.purge(self.index.pop(p), actor=self.created_by)
+            mem_id = self.index.pop(p)
+            if p in purged:
+                self.db.purge(mem_id, actor=self.created_by)
+            self._retire_only.discard(p)
         return f"Successfully deleted {path}"
 
     def _rename(self, old_path: str, new_path: str) -> str:
@@ -225,7 +242,9 @@ class MemoryToolBackend:
         except (KeyError, PermissionError, RuntimeError, ValueError) as exc:
             return self._refused(old_path, "renamed", exc)
         self.db.add_provenance_edge(new_id, old_id, "supersedes")
-        self.db.purge(old_id, actor=self.created_by)
+        if old_path not in self._retire_only:
+            self.db.purge(old_id, actor=self.created_by)
+        self._retire_only.discard(old_path)
         del self.index[old_path]
         self.index[new_path] = new_id
         return f"Successfully renamed {old_path} to {new_path}"
@@ -293,6 +312,7 @@ class MemoryToolBackend:
             return self._refused(path, "edited", exc)
         self.db.add_provenance_edge(new_id, old_id, "supersedes")
         self.index[path] = new_id   # old versions retained as superseded history
+        self._retire_only.discard(path)
         return None
 
     @staticmethod
@@ -304,12 +324,25 @@ class MemoryToolBackend:
         return f"Error: {path} changed while it was being {verb}. View it and try again."
 
     def _rebuild_index(self):
-        latest: dict[str, float] = {}
-        for r in self.db.store.candidates(self.db.tenant):
-            src = r.get("source") or {}
-            if src.get("kind") != "memfile":
-                continue
+        """Point each path at its newest version. When that version is superseded
+        (the file was deleted) but an older version is still current, the older
+        one is the file: a stale second writer's deleted version must not hide it
+        from the principals who can read it. Delete never purged such a version,
+        because the superseded one hid it, so it is marked retire-only."""
+        newest: dict[str, dict] = {}
+        live: dict[str, dict] = {}
+        for meta in self.db.store.candidate_meta(self.db.tenant):
+            src = meta.get("source") or {}
             uri = src.get("uri")
-            if uri and r["created_at"] >= latest.get(uri, -1):
-                latest[uri] = r["created_at"]
-                self.index[uri] = r["id"]
+            if src.get("kind") != "memfile" or not uri:
+                continue
+            if meta["created_at"] >= newest.get(uri, meta)["created_at"]:
+                newest[uri] = meta
+            if (meta.get("review_state") not in DEFAULT_HIDDEN_REVIEW_STATES
+                    and meta["created_at"] >= live.get(uri, meta)["created_at"]):
+                live[uri] = meta
+        for uri, meta in newest.items():
+            if meta.get("review_state") == ReviewState.SUPERSEDED.value and uri in live:
+                meta = live[uri]
+                self._retire_only.add(uri)
+            self.index[uri] = meta["id"]

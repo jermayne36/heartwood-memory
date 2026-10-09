@@ -2,6 +2,31 @@
 
 All notable changes to `heartwood-memory` are documented here.
 
+## [Unreleased]
+
+### Security
+- The MCP server binds the tenant and principal from its configuration (`HEARTWOOD_TENANT`, `HEARTWOOD_MCP_PRINCIPAL_ID`, `HEARTWOOD_MCP_ROLES`, `HEARTWOOD_MCP_ATTRS`, `HEARTWOOD_MCP_CLEARANCE`, or `build_server(principal=...)`). A tool call that sends `tenant`, `principal_id`, `roles`, `attrs`, `clearance`, `created_by`, `actor` or any undeclared argument is rejected. `memory`, `evaluate_egress` and `assess_faithfulness` read only what that principal can read, an encrypted source span must carry its `content_hash`, and `explain_recall` explains only the principal's own recalls.
+- Memory tool: with a principal, deleting another principal's file needs the `reviewer` role (`approver` for an approved version), the same rule as editing it. A refused delete changes nothing, also when it names a directory and only one file in it is refused. The MCP `memory` tool always runs as the server's principal.
+- `purge` and `approve` refuse another tenant's record with `KeyError("unknown memory id: ...")`, as `transition_review`, `expire` and `set_indexed` now do too. `heartwood purge` needs the record's own `--tenant`. `purge` of an id that does not exist still returns `False`.
+
+### Added
+- `remember(..., supersedes=<id or list>)` retires the memories a write replaces. One transaction inserts the new memory, moves each listed memory to `review_state="superseded"` and appends one `remember` audit row that names them; if any part fails, nothing is written. Default recall stops returning a superseded memory, and `include_review_states=["superseded"]` still reaches it. With `principal=`, a memory the principal cannot read is refused like an unknown id, and retiring another principal's memory needs the `reviewer` or `approver` role (`approver` for an approved memory). The MCP `remember` tool accepts `supersedes`. Heartwood still does not detect a replacement on its own: two plain writes both stay current.
+- `Heartwood.supersede(ids, *, actor, principal=None, reason="")` retires memories without writing a replacement, under the `remember(supersedes=...)` rules, with one `supersede` audit row each, in one transaction.
+- `Heartwood.can_read(principal, meta)` applies the recall policy to one record. `evaluate_egress` and `assess_faithfulness` take an optional `principal`.
+
+### Fixed
+- Memory tool: `str_replace`, `insert` and `rename` retire the file's earlier versions in the same write, so default recall returns only the current text. `delete` purges the current version and retires the earlier ones; they stay reachable with `include_review_states=["superseded"]` until `forget(subject)`. A deleted file no longer comes back after a restart, and its path can be reused.
+- Memory tool: when a backend with a stale index wrote and then deleted its own versions of a file, the owner's older version is the file again after a restart instead of reading as missing. Deleting or renaming it retires that version rather than purging it.
+- OpenClaw-style example adapter: writing a path again retires its earlier versions, and `delete_path` purges the current version and retires the earlier ones, so neither `memory_search` nor a restart returns old text.
+- `evaluate_egress` classifies a span whose text resolves from a stored memory at least as strictly as that memory.
+
+### Changed
+- A principal-scoped `MemoryToolBackend` refuses a `created_by` other than the principal's id.
+
+### Existing data
+- Nothing is rewritten at startup. A memory-tool or OpenClaw file whose earlier versions were written by an older release keeps them in default recall until the file is next edited, renamed or deleted through the adapter. A file deleted with an older release can come back after a restart; deleting it again retires its history.
+- Files the MCP `memory` tool wrote with 0.2.9 or earlier are authored by `agent:memory`. The server's principal (by default `agent:mcp`) needs the `reviewer` role to edit or delete them.
+
 ## [0.2.9] - 2026-10-03
 
 ### Fixed

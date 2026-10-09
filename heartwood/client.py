@@ -556,21 +556,7 @@ class Heartwood:
         for target_id in ids:
             meta = self.store.get_meta(target_id)
             if principal is not None:
-                # @fail-closed(remember-supersede-principal): a record the principal
-                # cannot read is refused exactly like an id that does not exist.
-                if not meta or meta["tenant"] != self.tenant or not self.can_read(principal, meta):
-                    raise KeyError(f"unknown memory id: {target_id}")
-                approved = (
-                    meta["epistemic"] == Epistemic.APPROVED_CANONICAL.value
-                    or meta["truth_status"] == "human_approved"
-                )
-                roles = set(principal.roles)
-                if approved and "approver" not in roles:
-                    raise PermissionError("superseding an approved memory requires the 'approver' role")
-                if not approved and meta["created_by"] != principal.id and not roles & REVIEW_ROLES:
-                    raise PermissionError(
-                        "superseding another principal's memory requires the 'reviewer' or 'approver' role"
-                    )
+                self._authorize_retirement(target_id, meta, principal, verb="superseding")
             else:
                 if not meta or meta["tenant"] != self.tenant:
                     raise KeyError(f"unknown memory id: {target_id}")
@@ -590,6 +576,28 @@ class Heartwood:
                 },
             })
         return targets
+
+    def _authorize_retirement(self, target_id, meta, principal: Principal, *, verb: str) -> None:
+        """Refuse unless `principal` may retire the record, by superseding or deleting it.
+
+        It may retire its own record, or any record with the ``reviewer`` or
+        ``approver`` role; an approved record needs ``approver``.
+        """
+        # @fail-closed(remember-supersede-principal): a record the principal
+        # cannot read is refused exactly like an id that does not exist.
+        if not meta or meta["tenant"] != self.tenant or not self.can_read(principal, meta):
+            raise KeyError(f"unknown memory id: {target_id}")
+        approved = (
+            meta["epistemic"] == Epistemic.APPROVED_CANONICAL.value
+            or meta["truth_status"] == "human_approved"
+        )
+        roles = set(principal.roles)
+        if approved and "approver" not in roles:
+            raise PermissionError(f"{verb} an approved memory requires the 'approver' role")
+        if not approved and meta["created_by"] != principal.id and not roles & REVIEW_ROLES:
+            raise PermissionError(
+                f"{verb} another principal's memory requires the 'reviewer' or 'approver' role"
+            )
 
     def evaluate_egress(self, request: dict, provider_registry: dict | None = None, *,
                         principal: Principal | None = None) -> dict:
@@ -1277,7 +1285,7 @@ class Heartwood:
         if "approver" not in principal.roles:
             raise PermissionError("approve requires the 'approver' role")
         meta = self.store.get_meta(mem_id)
-        if not meta:
+        if not meta or meta["tenant"] != self.tenant:
             raise KeyError(f"unknown memory id: {mem_id}")
         if meta.get("review_state") in {
             ReviewState.PROPOSED.value,
@@ -1786,8 +1794,15 @@ class Heartwood:
 
     def purge(self, mem_id: str, actor="system") -> bool:
         """Physically remove a single memory row + its derived artifacts (per-file
-        delete). Crypto-shred of the shared subject key is reserved for forget()."""
-        existed = self.store.get_meta(mem_id) is not None
+        delete). Crypto-shred of the shared subject key is reserved for forget().
+
+        Another tenant's record is refused with ``KeyError`` and nothing is
+        deleted; an id that does not exist returns False."""
+        meta = self.store.get_meta(mem_id)
+        # @fail-closed(purge-tenant): a tenant's client never deletes another tenant's row.
+        if meta is not None and meta["tenant"] != self.tenant:
+            raise KeyError(f"unknown memory id: {mem_id}")
+        existed = meta is not None
         self._text_cache.pop(mem_id, None)
         self._token_cache.pop(mem_id, None)
         self._bm25_corpus_cache.clear()

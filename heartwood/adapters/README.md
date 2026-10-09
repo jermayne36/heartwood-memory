@@ -40,13 +40,19 @@ can't:
 - **Principal scope** — pass `principal=Principal(...)` and the backend acts as
   that principal: it lists, reads and edits only files whose current version the
   principal can read, cannot create or rename over one it cannot, and signs its
-  writes as the principal (a different `created_by` is refused). Retiring earlier
-  versions follows the rules of `remember(supersedes=...)`: an edit, rename or
-  delete that would retire another principal's version, or an approved one, is
-  refused unless the principal holds the `reviewer` (or `approver`) role. The
-  current version that `delete` purges is not checked this way: the principal may
-  delete any file it can read, as before. A version the principal cannot read is
-  left as it is. Without `principal` the backend sees every file in the tenant.
+  writes as the principal (a different `created_by` is refused). Retiring or
+  deleting a version follows the rules of `remember(supersedes=...)`: an edit,
+  rename or delete that would retire or purge another principal's version, or an
+  approved one, is refused unless the principal holds the `reviewer` (or
+  `approver`) role. A refused command changes nothing, even when it names a
+  directory and only one file in it is refused. A version the principal cannot
+  read is left as it is. Without `principal` the backend sees every file in the
+  tenant and may delete any of them.
+- **Stale second writers** — the path index is built when the backend starts.
+  If a backend whose index predates a file writes and then deletes its own
+  versions at that path, the owner's older version is still the file after a
+  restart. Deleting or renaming it then retires that version instead of purging
+  it, because the newer, superseded version had hidden it from `delete` before.
 
 ```python
 from heartwood import Heartwood
@@ -122,9 +128,10 @@ Every read-capable tool stays inside that principal:
   index is built when the server starts, so a file another process writes later
   is not seen until restart: run one `memory` writer per store. An edit retires
   the file's earlier versions and a delete leaves nothing from the file in
-  default recall (section 1). Retiring another principal's version needs the
-  `reviewer` role, so editing or renaming another principal's file does too;
-  `delete` still purges the current version of any file the principal can read.
+  default recall for the deleting principal (section 1). Retiring or purging
+  another principal's version needs the `reviewer` role (`approver` for an
+  approved version), so editing, renaming or deleting another principal's file
+  does too.
 - `remember` writes as the principal. Heartwood does not detect that a memory
   replaces an older one; the client says so with `supersedes` (one id or a list),
   and the listed memories leave default recall in the same audited step. Each must
@@ -182,7 +189,12 @@ before retaining, and exposes JSON-returning recall/remember/forget tools.
 `HeartwoodOpenClawMemoryRuntime` is a Markdown-memory example exposing
 `memory_search` and `memory_get` over Heartwood-backed memories. Missing files
 degrade to `{ text: "", path }`, path traversal is blocked, and recall is still
-policy-filtered before ranking.
+policy-filtered before ranking. Writing a path again supersedes its earlier
+versions, so `memory_search` returns only the current text. `delete_path` purges
+the current version and supersedes the earlier ones; the path stays deleted after
+a restart, and `forget(subject)` erases the history. The runtime takes no
+principal: `memory_get` and `delete_path` act on any path in the tenant, so
+expose them only to trusted code.
 
 Adapter contract tests:
 
