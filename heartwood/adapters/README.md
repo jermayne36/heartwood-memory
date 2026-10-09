@@ -102,7 +102,9 @@ Every read-capable tool stays inside that principal:
   only this principal's own recalls.
 - `memory` lists, reads and edits only `/memories` files whose current version
   the principal can read, and writes as the principal. It cannot create or rename
-  over a file it cannot read; it is told only that the path exists.
+  over a file it cannot read; it is told only that the path exists. The file
+  index is built when the server starts, so a file another process writes later
+  is not seen until restart: run one `memory` writer per store.
 - `evaluate_egress` and `assess_faithfulness` resolve a cited memory's stored
   text only when the principal can read that memory. An encrypted span must also
   carry its `content_hash`, so knowing a memory id is not enough to read the text

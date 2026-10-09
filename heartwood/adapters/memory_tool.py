@@ -70,7 +70,8 @@ class MemoryToolBackend:
     edits only files whose current version the principal can read, cannot create
     or rename over a file it cannot read, and authors writes as the principal
     unless `created_by` says otherwise. Without one it sees every file in the
-    tenant, for trusted in-process callers."""
+    tenant, for trusted in-process callers. The path index is built once, when
+    the backend is constructed."""
 
     def __init__(self, db, *, created_by=None, subject="memory-tool-user",
                  classification="internal", model_version="memory-tool", principal=None):
