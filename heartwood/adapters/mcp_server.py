@@ -14,9 +14,10 @@ HEARTWOOD_MCP_CLEARANCE (default internal). MCP clients cannot choose any of the
 tool call that sends tenant, principal_id, roles, attrs, clearance, created_by, actor,
 or any other argument the tool does not declare is rejected, not ignored. Reads stay
 inside that principal too: recall filters by its policy, explain_recall explains only
-its own recalls, memory lists, reads and edits only /memories files it can read, and
+its own recalls, memory lists, reads and edits only /memories files it can read,
 evaluate_egress and assess_faithfulness resolve a cited memory's text only when it can
-read that memory.
+read that memory, and remember's supersedes retires only memories it can read and may
+retire (an unreadable id is refused like an unknown one).
 forget is the exception: it erases a whole subject, including memories the principal
 cannot read.
 Tool exposure is fail-closed: when HEARTWOOD_MCP_ALLOWED_TOOLS is unset the server
@@ -276,9 +277,22 @@ class MCPMemoryAPI:
                  source_ids: list[str] | str | None = None,
                  source_spans: list[dict] | None = None,
                  policy_scope: str = "", confidence: float = 0.8,
-                 salience: float = 0.5) -> dict:
-        """Store a governed memory. Returns id plus persisted governance metadata."""
+                 salience: float = 0.5, supersedes: list[str] | str | None = None,
+                 principal: Principal | None = None) -> dict:
+        """Store a governed memory. Returns id plus persisted governance metadata.
+
+        `supersedes` retires the listed memories in the same write (see
+        Heartwood.remember). With `principal`, each one must be a memory that
+        principal can read and may retire; an unreadable one is refused like an
+        unknown id.
+        """
         client = self.client(tenant)
+        if supersedes is None:
+            superseded_ids: tuple[str, ...] = ()
+        elif isinstance(supersedes, str):
+            superseded_ids = (supersedes,)
+        else:
+            superseded_ids = tuple(supersedes)
         policy = policy_from(
             {
                 "classification": classification,
@@ -305,6 +319,8 @@ class MCPMemoryAPI:
             policy_scope=policy_scope or client.tenant.split(":", 1)[-1],
             source_ids=source_id_values,
             source_spans=tuple(source_spans or ()),
+            supersedes=superseded_ids,
+            principal=principal,
         )
         return {
             "ok": True,
@@ -314,6 +330,7 @@ class MCPMemoryAPI:
             "classification": policy.classification,
             "roles": list(policy.roles),
             "source_ids": list(source_id_values),
+            "supersedes": list(dict.fromkeys(superseded_ids)),
         }
 
     def recall(self, cue: str, principal_id: str = "agent:mcp",
@@ -527,8 +544,10 @@ def build_server(db: Heartwood | None = None, backend: MemoryToolBackend | None 
     @_register_tool(mcp, allowed_tools, declared_arguments)
     def remember(content: str, subject: str, kind: str = "semantic",
                  epistemic: str = "user-stated", classification: str = "internal",
-                 pii: bool = False, source_uri: str = "") -> dict:
-        """Store a governed memory as this server's principal (provenance-signed, policy-tagged, audited). Returns its id."""
+                 pii: bool = False, source_uri: str = "",
+                 supersedes: list[str] | str | None = None) -> dict:
+        """Store a governed memory as this server's principal (provenance-signed, policy-tagged, audited). Returns its id.
+        Heartwood does not detect that a memory replaces an older one. When it does, pass the older ids in supersedes: they are retired in the same step and default recall stops returning them. Only memories this server's principal can read and may retire (its own, or any with a reviewer or approver role) can be superseded."""
         return api.remember(
             content,
             subject=subject,
@@ -539,6 +558,8 @@ def build_server(db: Heartwood | None = None, backend: MemoryToolBackend | None 
             classification=classification,
             pii=pii,
             source_uri=source_uri,
+            supersedes=supersedes,
+            principal=principal,
         )
 
     @_register_tool(mcp, allowed_tools, declared_arguments)

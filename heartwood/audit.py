@@ -19,12 +19,17 @@ class AuditLog:
         self.store = store
         self.after_append = after_append
 
-    def append(self, tenant, principal, action, target, detail: dict) -> str:
-        body = json.dumps(
+    @staticmethod
+    def body(tenant, principal, action, target, detail: dict) -> str:
+        """The canonical row body, for callers that append inside their own transaction."""
+        return json.dumps(
             {"tenant": tenant, "principal": principal, "action": action,
              "target": target, "detail": detail},
             sort_keys=True, separators=(",", ":"),
         )
+
+    def append(self, tenant, principal, action, target, detail: dict) -> str:
+        body = self.body(tenant, principal, action, target, detail)
         if hasattr(self.store, "append_audit_atomic"):
             row_hash = self.store.append_audit_atomic(
                 tenant, principal, action, target, body
