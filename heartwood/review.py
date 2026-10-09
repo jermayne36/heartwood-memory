@@ -72,3 +72,20 @@ def validate_transition(frm: str | ReviewState | None,
     if to_state not in LEGAL_TRANSITIONS[from_state]:
         raise ValueError(f"illegal review transition: {from_state.value} -> {to_state.value}")
     return to_state.value
+
+
+def validate_supersede(frm: str | ReviewState | None) -> str:
+    """Validate retiring a record because a newer record replaces it.
+
+    Unlike validate_transition, a record outside the review workflow (NULL) may be
+    superseded: a plain write is exactly what `remember(supersedes=...)` replaces.
+    A record inside the workflow follows LEGAL_TRANSITIONS, so a rejected or an
+    already superseded record cannot be superseded.
+    """
+    from_state_value = normalize_review_state(frm)
+    if from_state_value is None:
+        return ReviewState.SUPERSEDED.value
+    from_state = ReviewState(from_state_value)
+    if ReviewState.SUPERSEDED not in LEGAL_TRANSITIONS[from_state]:
+        raise ValueError(f"illegal review transition: {from_state.value} -> superseded")
+    return ReviewState.SUPERSEDED.value

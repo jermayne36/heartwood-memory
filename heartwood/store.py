@@ -134,6 +134,71 @@ class Store:
 
     # -- memories -------------------------------------------------------- #
     def insert_memory(self, m: dict, content_enc: bytes, emb):
+        self._insert_memory_row(m, content_enc, emb)
+        self.conn.commit()
+
+    def insert_memory_superseding(
+        self,
+        m: dict,
+        content_enc: bytes,
+        emb,
+        *,
+        superseded: list[dict],
+        derived_from: tuple[str, ...],
+        principal: str,
+        audit_body: str,
+    ) -> dict | None:
+        """Insert a memory, supersede prior rows and audit both in one transaction.
+
+        Each superseded entry carries the ``expected`` field values its retirement
+        was checked against (review_state, epistemic, created_by, content_hash).
+        If any row no longer matches, nothing is written and None is returned.
+        No provenance edge links the new row to a superseded one: the erasure
+        cascade follows every edge, so an edge would make forgetting the old
+        record's subject also purge its replacement.
+        """
+        tenant = m["tenant"]
+        try:
+            self.conn.execute("BEGIN IMMEDIATE")
+            self._insert_memory_row(m, content_enc, emb)
+            for target in superseded:
+                expected = target["expected"]
+                cur = self.conn.execute(
+                    "UPDATE memories SET review_state='superseded' "
+                    "WHERE id=? AND tenant=? AND review_state IS ? AND epistemic IS ? "
+                    "AND created_by IS ? AND content_hash IS ?",
+                    (
+                        target["id"],
+                        tenant,
+                        expected["review_state"],
+                        expected["epistemic"],
+                        expected["created_by"],
+                        expected["content_hash"],
+                    ),
+                )
+                if cur.rowcount != 1:
+                    self.conn.rollback()
+                    return None
+            for parent in derived_from:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO prov_edges VALUES (?,?,?)",
+                    (m["id"], parent, "derived_from"),
+                )
+            for artifact_id, kind in ((m["id"], "memory"), (f"emb:{m['id']}", "embedding")):
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO deletion_lineage VALUES (?,?,?,?)",
+                    (artifact_id, kind, m["subject"], tenant),
+                )
+            transition = self.append_audit_in_transaction(
+                tenant, principal, "remember", m["id"], audit_body,
+            )
+            self.conn.commit()
+            return transition
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def _insert_memory_row(self, m: dict, content_enc: bytes, emb):
         emb_bytes = np.asarray(emb, dtype=np.float32).tobytes() if emb is not None else None
         emb_dim = int(len(emb)) if emb is not None else 0
         self.conn.execute(
@@ -159,7 +224,6 @@ class Store:
              m.get("index_text_enc"), content_enc, emb_bytes, emb_dim,
              int(m.get("indexed", True))),
         )
-        self.conn.commit()
 
     def get_meta(self, mem_id: str) -> dict | None:
         r = self.conn.execute("SELECT * FROM memories WHERE id=?", (mem_id,)).fetchone()

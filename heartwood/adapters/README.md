@@ -105,6 +105,12 @@ Every read-capable tool stays inside that principal:
   over a file it cannot read; it is told only that the path exists. The file
   index is built when the server starts, so a file another process writes later
   is not seen until restart: run one `memory` writer per store.
+- `remember` writes as the principal. Heartwood does not detect that a memory
+  replaces an older one; the client says so with `supersedes` (one id or a list),
+  and the listed memories leave default recall in the same audited step. Each must
+  be one the principal can read, or it is refused like an unknown id, and one it
+  may retire: its own, or any memory if it holds the `reviewer` or `approver`
+  role (`approver` for an approved memory).
 - `evaluate_egress` and `assess_faithfulness` resolve a cited memory's stored
   text only when the principal can read that memory. An encrypted span must also
   carry its `content_hash`, so knowing a memory id is not enough to read the text

@@ -54,8 +54,10 @@ from .retrieval import (
 )
 from .review import (
     DEFAULT_HIDDEN_REVIEW_STATES,
+    REVIEW_ROLES,
     ReviewState,
     normalize_review_state,
+    validate_supersede,
     validate_transition,
 )
 from .source_spans import normalize_self_spans, split_source_span_texts
@@ -365,7 +367,24 @@ class Heartwood:
                  memory_id=None, truth_status=None, policy_scope="default",
                  valid_from=None, valid_until=None, entities=(), source_ids=(),
                  source_spans=(), subject_ids=(), created_at=None, review_state=None,
-                 index_text=None, indexed=True):
+                 index_text=None, indexed=True, supersedes=(), principal=None):
+        """Store a governed memory and return its id.
+
+        Heartwood does not detect that a new memory replaces an older one: two
+        plain writes both stay current. Pass ``supersedes`` (an id or a list of
+        ids) to say so. The new memory is written, each listed memory moves to
+        review_state ``superseded``, and one ``remember`` audit row records both,
+        in one transaction: if any part fails, nothing is written. Default recall
+        stops returning the superseded memories; ``include_review_states=
+        ["superseded"]`` still reaches them.
+
+        ``principal``, when given, is who the write runs as: ``created_by`` must be
+        its id. Each superseded memory must then be one it can read, or it is
+        refused exactly like an unknown id, and one it may retire: its own memory,
+        or any memory with the ``reviewer`` or ``approver`` role (an approved
+        memory needs ``approver``). Without ``principal`` the caller is trusted,
+        as with ``expire`` and ``set_indexed``.
+        """
         if epistemic == Epistemic.APPROVED_CANONICAL.value:
             raise PermissionError("approved-canonical requires approve(), not remember()")
         if type(indexed) is not bool:
@@ -380,6 +399,16 @@ class Heartwood:
                     "capability contracts require the continuity-privileged "
                     "scope and indexed=False"
                 )
+        if principal is not None and principal.id != created_by:
+            raise ValueError("created_by must equal principal.id when principal is given")
+        # Resolved before anything is signed, keyed or stored, so a refused
+        # supersede leaves no trace.
+        superseded = self._superseded_targets(
+            supersedes,
+            principal=principal,
+            memory_id=memory_id,
+            writing_contract=kind == "capability-contract",
+        )
         policy = policy or Policy()
         source = source or {}
         # High-water-mark: a derived memory inherits the policy of its most-
@@ -462,21 +491,105 @@ class Heartwood:
             "producer_sig": sig, "sig_valid": sig_valid,
             "indexed": indexed,
         }
-        self.store.insert_memory(row, content_enc, emb)
+        detail = {"kind": kind, "epistemic": epistemic,
+                  "classification": policy.classification,
+                  "indexed": indexed}
+        if superseded:
+            detail["supersedes"] = [
+                {"id": target["id"], "from": target["expected"]["review_state"],
+                 "to": ReviewState.SUPERSEDED.value}
+                for target in superseded
+            ]
+            # @fail-closed(remember-supersede-atomic): the new row, every
+            # retirement and the audit row commit together or not at all.
+            transition = self.store.insert_memory_superseding(
+                row, content_enc, emb,
+                superseded=superseded,
+                derived_from=tuple(derived_from),
+                principal=created_by,
+                audit_body=AuditLog.body(self.tenant, created_by, "remember", mem_id, detail),
+            )
+            if transition is None:
+                raise RuntimeError(
+                    "a superseded memory changed during remember: "
+                    + ", ".join(target["id"] for target in superseded)
+                )
+        else:
+            self.store.insert_memory(row, content_enc, emb)
         if indexed:
             self._cache_text_pair(mem_id, content, text_to_index)
             self._tokens_for_index_text(mem_id, text_to_index)
             self._bm25_corpus_cache.clear()
             self.index.add(mem_id, self.tenant, emb)
+        if superseded:
+            if self.audit.after_append is not None:
+                self.audit.after_append()
+            return mem_id
         for p in derived_from:
             self.store.add_edge(mem_id, p)
         self.store.register_lineage(mem_id, "memory", subject, self.tenant)
         self.store.register_lineage(f"emb:{mem_id}", "embedding", subject, self.tenant)
-        self.audit.append(self.tenant, created_by, "remember", mem_id,
-                          {"kind": kind, "epistemic": epistemic,
-                           "classification": policy.classification,
-                           "indexed": indexed})
+        self.audit.append(self.tenant, created_by, "remember", mem_id, detail)
         return mem_id
+
+    def _superseded_targets(self, supersedes, *, principal: Principal | None,
+                            memory_id, writing_contract: bool) -> list[dict]:
+        """Resolve and authorize the records a write supersedes, before any write.
+
+        Returns, per record, the field values the retirement was checked against;
+        the store compare-and-swaps on them so a concurrent change refuses the
+        whole write.
+        """
+        if supersedes is None:
+            return []
+        ids = (supersedes,) if isinstance(supersedes, str) else tuple(supersedes)
+        if not ids:
+            return []
+        if any(not isinstance(item, str) or not item for item in ids):
+            raise TypeError("supersedes must be a memory id or a list of memory ids")
+        ids = tuple(dict.fromkeys(ids))
+        if memory_id is not None and memory_id in ids:
+            raise ValueError("a memory cannot supersede itself")
+        if writing_contract:
+            raise PermissionError("capability contracts cannot supersede through remember()")
+        targets = []
+        for target_id in ids:
+            meta = self.store.get_meta(target_id)
+            if principal is not None:
+                # @fail-closed(remember-supersede-principal): a record the principal
+                # cannot read is refused exactly like an id that does not exist.
+                if not meta or meta["tenant"] != self.tenant or not self.can_read(principal, meta):
+                    raise KeyError(f"unknown memory id: {target_id}")
+                approved = (
+                    meta["epistemic"] == Epistemic.APPROVED_CANONICAL.value
+                    or meta["truth_status"] == "human_approved"
+                )
+                roles = set(principal.roles)
+                if approved and "approver" not in roles:
+                    raise PermissionError("superseding an approved memory requires the 'approver' role")
+                if not approved and meta["created_by"] != principal.id and not roles & REVIEW_ROLES:
+                    raise PermissionError(
+                        "superseding another principal's memory requires the 'reviewer' or 'approver' role"
+                    )
+            else:
+                if not meta or meta["tenant"] != self.tenant:
+                    raise KeyError(f"unknown memory id: {target_id}")
+                if (
+                    meta.get("kind") == "capability-contract"
+                    and meta.get("policy_scope") == "continuity-privileged"
+                ):
+                    raise PermissionError("capability contracts cannot be superseded through remember()")
+            validate_supersede(meta.get("review_state"))
+            targets.append({
+                "id": target_id,
+                "expected": {
+                    "review_state": meta.get("review_state"),
+                    "epistemic": meta["epistemic"],
+                    "created_by": meta["created_by"],
+                    "content_hash": meta["content_hash"],
+                },
+            })
+        return targets
 
     def evaluate_egress(self, request: dict, provider_registry: dict | None = None, *,
                         principal: Principal | None = None) -> dict:

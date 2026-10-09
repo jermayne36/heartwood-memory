@@ -4,6 +4,13 @@ Default recall answers one question: **what is true right now?** This page state
 the visibility contract that answer rests on, and the preservation-safe way to
 retire a record without destroying it.
 
+> **Heartwood does not detect replacements on its own.** If two plain
+> `remember()` calls contradict each other, both stay current. Default recall can
+> return both, and the older one may rank first. A record leaves default recall
+> only when a caller retires it with one of the mechanisms below. Most often that
+> is `remember(..., supersedes=old_id)`: the write that replaces the old record
+> says so.
+
 ## Default recall visibility contract
 
 `Heartwood.recall(cue, principal=...)` with no `filters` applies three gates
@@ -102,20 +109,67 @@ Both verbs accept a re-assertion of the state a record is already in. That is a
 deliberate no-op that still writes the audit event, so a change made out of band
 can be put on the record after the fact.
 
-### 3. Supersede it — `transition_review` (preserves the row, terminal)
+### 3. Supersede it (preserves the row, terminal)
+
+Use this when a **newer record replaces this one** and the replacement is final.
+There are two ways in. Both move the record to `review_state = "superseded"`,
+which drops it out of default recall as a hidden review state. It stays
+recoverable with `include_review_states=["superseded"]`. The row, its content, its
+provenance and its `indexed` flag are untouched. `superseded` is terminal: it has
+no legal exits, and `approve()` refuses it.
+
+#### 3a. In the write that replaces it — `remember(supersedes=...)`
+
+```python
+new_id = db.remember(
+    "Deploys need two approvers.",
+    subject="policy:deploy",
+    created_by="agent:ops",
+    supersedes=old_id,          # one id, or a list of ids
+)
+```
+
+One transaction inserts the new record, moves every listed record to
+`superseded` and appends a single `remember` audit row that names them. If any
+part fails, nothing is written. If a listed record changed after it was checked,
+the write is refused. That includes a change to its review state, author, epistemic
+class or content hash.
+
+A record outside the review workflow (`review_state` NULL, the state of every
+plain write) can be superseded. A record inside the workflow follows
+`LEGAL_TRANSITIONS`: `proposed`, `accepted` and `disputed` can be superseded,
+`rejected` and `superseded` cannot. Capability contracts can neither supersede
+nor be superseded this way.
+
+No provenance edge links the new record to the old one. The erasure cascade
+(`forget`) follows every provenance edge. An edge would make forgetting the old
+record's subject also purge its replacement. Use `derived_from` when the new
+record really is derived from the old content.
+
+Pass `principal=` when the write is made on behalf of a principal rather than
+by trusted code. `created_by` must equal `principal.id`, and each listed record
+must be:
+
+- **readable by that principal.** A record it cannot read is refused with the
+  same `KeyError("unknown memory id: ...")` as an id that does not exist, so the
+  refusal does not reveal that the record exists. The same holds for another
+  tenant's record.
+- **one it may retire.** That means its own record, or any record if it holds the
+  `reviewer` or `approver` role. An approved record (`approved-canonical`) needs
+  `approver`, the role `approve()` requires.
+
+The MCP `remember` tool always passes the server's bound principal.
+
+#### 3b. Later, by a reviewer — `transition_review`
 
 ```python
 db.transition_review(mem_id, "superseded", reviewer_principal, reason="replaced by v2")
 ```
 
 Requires the `reviewer` or `approver` role, validates the transition against
-`LEGAL_TRANSITIONS` (`heartwood/review.py`), writes a `review_transition` audit
-event, and leaves the row and its `indexed` flag intact. The record drops out of
-default recall as a hidden review state and is recoverable with
-`include_review_states=["superseded"]`.
-
-`superseded` is terminal — it has no legal exits, and `approve()` refuses it.
-Use this when a **newer record replaces this one** and the replacement is final.
+`LEGAL_TRANSITIONS` (`heartwood/review.py`), and writes a `review_transition`
+audit event. It applies only to records already in the review workflow; use 3a
+for a plain write.
 
 ### 4. Purge it — `db.purge` (destroys the row)
 
@@ -135,6 +189,7 @@ Each mechanism appends one row to the hash-chained audit log, so the question
 | --- | --- | --- |
 | `db.expire` | `expire` | `{"from": <prior valid_until>, "to": <new>, "reason": ...}` |
 | `db.set_indexed` | `index_state` | `{"from": <prior indexed>, "to": <new>, "reason": ...}` |
+| `db.remember(..., supersedes=...)` | `remember` (target: the **new** record) | `{..., "supersedes": [{"id": <old id>, "from": <state>, "to": "superseded"}]}` |
 | `db.transition_review` | `review_transition` | `{"from": <state>, "to": <state>, "reason": ...}` |
 | `db.purge` | `purge` | `{}` |
 
@@ -144,6 +199,10 @@ Each mechanism appends one row to the hash-chained audit log, so the question
 db.verify_audit()      # the chain still verifies after any of them
 ```
 
+A record retired by `remember(..., supersedes=...)` is named in the `detail` of
+its replacement's row, not in the `target` column. To find which write replaced
+it, look for `mem_id` in `json.loads(row["body"])["detail"].get("supersedes", [])`.
+
 ## Authorization
 
 Who may call each retirement verb, as of this release:
@@ -151,6 +210,8 @@ Who may call each retirement verb, as of this release:
 | Verb | Caller model | Requires a role? |
 | --- | --- | --- |
 | `db.transition_review` | role-bearing `Principal` (`reviewer` / `approver`) | yes |
+| `db.remember(..., supersedes=...)` with `principal=` | `Principal`; the MCP `remember` tool always passes the server's | only to retire another principal's record (`reviewer` / `approver`) or an approved one (`approver`) |
+| `db.remember(..., supersedes=...)` without `principal=` | `created_by` string | no |
 | `db.expire` | `actor` string | no |
 | `db.set_indexed` | `actor` string | no |
 | `db.purge` | `actor` string | no |
@@ -161,10 +222,13 @@ not role-gated; `transition_review` and `approve` require a principal with a
 role. This is a deliberate, documented position, not an oversight:
 
 - The `actor` field is **audit attribution, not an authentication boundary.**
-  None of these verbs are reachable over the network: the MCP/HTTP surface is a
-  static, fail-closed allowlist (`recall`, `explain_recall`, `health`) with no
-  delegation to the client, so every retirement verb is in-process only, invoked
-  by code already trusted to open the store.
+  `expire`, `set_indexed` and `purge` are not reachable over the network: the
+  MCP/HTTP surface does not expose them, so they are in-process only, invoked by
+  code already trusted to open the store. `forget`, and `remember` with
+  `supersedes`, are reachable only through MCP tools an operator names in
+  `HEARTWOOD_MCP_ALLOWED_TOOLS`. There they run as the server's bound principal,
+  never one the client chooses. `supersedes` is then limited as described in
+  [3a](#3a-in-the-write-that-replaces-it--remembersupersedes).
 - Role-gating only the reversible, preservation-safe verbs (`expire`,
   `set_indexed`) while leaving the destructive ones (`forget`, `purge`) open
   would invert the risk gradient — gating the safe operations and not the

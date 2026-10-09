@@ -90,7 +90,7 @@ access. Details: `heartwood/adapters/README.md`, section "2. MCP server".
 
 | Tool | Purpose |
 |---|---|
-| `remember` | Governed write as the server's principal, with classification, PII flag, source URI, provenance signing, audit, encryption, and indexing |
+| `remember` | Governed write as the server's principal, with classification, PII flag, source URI, provenance signing, audit, encryption, and indexing. Heartwood does not detect replacements on its own: pass `supersedes` with the ids a new memory replaces, and they leave default recall in the same audited step (only memories the principal can read and may retire) |
 | `recall` | Policy-enforced recall; denied memories are not returned, or counted in the results or the receipt |
 | `explain_recall` | Ranking/freshness explanation without denied-candidate side channels |
 | `forget` | Crypto-shred subject key and purge derived memories, including memories the principal cannot read |
