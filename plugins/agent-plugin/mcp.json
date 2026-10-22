@@ -1,0 +1,25 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "heartwood": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "heartwood-memory==0.2.10",
+        "python",
+        "-c",
+        "from pathlib import Path; import os; from heartwood.adapters.mcp_server import main; p=Path.home()/'.heartwood'/'agent-plugin'; p.mkdir(parents=True, exist_ok=True); os.chdir(p); main()"
+      ],
+      "env": {
+        "HEARTWOOD_DB_PATH": "heartwood.db",
+        "HEARTWOOD_TENANT": "tenant:agent-plugin",
+        "HEARTWOOD_MCP_ALLOWED_TOOLS": "recall,explain_recall,health",
+        "HEARTWOOD_MCP_PRINCIPAL_ID": "agent:copilot",
+        "HEARTWOOD_MCP_ROLES": "",
+        "HEARTWOOD_MCP_ATTRS": "",
+        "HEARTWOOD_MCP_CLEARANCE": "internal"
+      }
+    }
+  }
+}
