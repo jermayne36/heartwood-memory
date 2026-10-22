@@ -1,9 +1,10 @@
 """Contract tests for Heartwood against the real Hermes Agent MemoryProvider ABC.
 
 Validated dependency pin:
-- hermes-agent 0.17.0
-- git tag v2026.6.19
-- tag commit 2bd1977d8fad185c9b4be47884f7e87f1add0ce3
+- Hermes Agent v0.22.4, commit 4d04303818b61bf3aa09278af48356315515965b
+
+Run with HEARTWOOD_TEST_HERMES=1; missing/broken Hermes then fails collection.
+Source installs report distribution version 0.0.0; verify the actual checkout.
 """
 from __future__ import annotations
 
@@ -11,7 +12,11 @@ import hashlib
 import importlib.metadata
 import inspect
 import json
+import os
 import re
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -23,22 +28,18 @@ from heartwood.adapters.hermes import HeartwoodHermesMemoryProvider, register
 from heartwood.envelope import Policy
 from heartwood.policy import Principal
 
-# TODO(public split 73ceae4): run this contract suite in the Hermes Agent
-# integration environment once that plugin boundary is published independently.
-# The public Heartwood package intentionally does not ship the external
-# ``agent`` or ``plugins`` modules that this real-provider contract exercises.
-MemoryProvider = pytest.importorskip(
-    "agent.memory_provider",
-    reason=(
-        "requires the optional Hermes Agent integration; the public Heartwood "
-        "split does not ship agent.memory_provider or plugins.memory"
-    ),
-).MemoryProvider
+if os.environ.get("HEARTWOOD_TEST_HERMES") != "1":
+    pytest.skip("Hermes opt-in: run plugins/hermes/check_release.sh", allow_module_level=True)
 
+# @fail-closed(hermes-release-opt-in)
+# Deliberately not importorskip: the release lane must fail if Hermes is absent.
+from agent import memory_provider as hermes_memory_provider  # noqa: E402
 
-HERMES_AGENT_VERSION = "0.17.0"
-HERMES_AGENT_TAG = "v2026.6.19"
-HERMES_AGENT_COMMIT = "2bd1977d8fad185c9b4be47884f7e87f1add0ce3"
+MemoryProvider = hermes_memory_provider.MemoryProvider
+HERMES_AGENT_VERSION = "0.22.4"
+HERMES_AGENT_TAG = "v0.22.4"
+HERMES_AGENT_COMMIT = "4d04303818b61bf3aa09278af48356315515965b"
+PLUGIN_DIR = Path(__file__).resolve().parents[1] / "plugins" / "hermes"
 TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
@@ -89,9 +90,32 @@ def make_provider(tmp_path: Path) -> HeartwoodHermesMemoryProvider:
 
 
 def test_hermes_dependency_pin_is_the_validated_release() -> None:
-    assert importlib.metadata.version("hermes-agent") == HERMES_AGENT_VERSION
-    assert HERMES_AGENT_TAG == "v2026.6.19"
-    assert HERMES_AGENT_COMMIT == "2bd1977d8fad185c9b4be47884f7e87f1add0ce3"
+    assert importlib.metadata.version("hermes-agent") == "0.0.0"
+    root = Path(hermes_memory_provider.__file__).resolve().parents[1]
+    actual = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+    assert actual == HERMES_AGENT_COMMIT, f"expected {HERMES_AGENT_TAG}, got {actual}"
+
+
+def test_opt_in_fails_collection_when_hermes_is_missing() -> None:
+    # @positive-control(hermes-release-opt-in)
+    script = """
+import importlib.abc
+import sys
+class MissingHermes(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "agent" or fullname.startswith("agent."):
+            raise ModuleNotFoundError("Hermes deliberately unavailable")
+sys.meta_path.insert(0, MissingHermes())
+import pytest
+raise SystemExit(pytest.main(["tests/test_hermes_integration.py", "-q"]))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script], cwd=PLUGIN_DIR.parents[1],
+        env={**os.environ, "HEARTWOOD_TEST_HERMES": "1"}, capture_output=True, text=True,
+    )
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "Hermes deliberately unavailable" in result.stdout + result.stderr
+    assert "skipped" not in result.stdout
 
 
 def test_provider_subclasses_real_memory_provider_abc_and_instantiates(tmp_path: Path) -> None:
@@ -127,16 +151,63 @@ def test_hermes_plugin_loader_loads_register_entrypoint(tmp_path: Path) -> None:
 
     plugin_dir = tmp_path / "heartwood"
     plugin_dir.mkdir()
-    (plugin_dir / "__init__.py").write_text(
-        "from heartwood.adapters.hermes import HeartwoodHermesMemoryProvider\n\n"
-        "def register(ctx):\n"
-        "    ctx.register_memory_provider(HeartwoodHermesMemoryProvider())\n",
-        encoding="utf-8",
-    )
+    shutil.copy(PLUGIN_DIR / "__init__.py", plugin_dir / "__init__.py")
 
     provider = _load_provider_from_dir(plugin_dir)
     assert isinstance(provider, HeartwoodHermesMemoryProvider)
     assert isinstance(provider, MemoryProvider)
+
+
+def test_session_switch_tracks_the_current_hermes_session(tmp_path: Path) -> None:
+    provider = make_provider(tmp_path)
+    provider.initialize("session-alpha", hermes_home=str(tmp_path))
+    provider.on_session_switch("session-beta", parent_session_id="session-alpha", reset=True)
+    provider.sync_turn("My project colour is aubergine.", "Saved.", turn_author={"id": "test-user"})
+    recalled = json.loads(provider.handle_tool_call(
+        "heartwood_recall", {"cue": "project colour", "subject": "session:session-beta"},
+    ))
+    assert any("aubergine" in row["content"] for row in recalled["results"])
+    assert provider.session_id == "session-beta"
+    provider.db.close()
+
+
+def test_real_manager_stores_and_recalls_a_fact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent.memory_manager import MemoryManager
+    from hermes_cli.config import load_config, save_config
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    from plugins.memory import load_memory_provider
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    plugin_dir = tmp_path / "plugins" / "heartwood"
+    plugin_dir.mkdir(parents=True)
+    shutil.copy(PLUGIN_DIR / "__init__.py", plugin_dir / "__init__.py")
+    shutil.copy(PLUGIN_DIR / "plugin.yaml", plugin_dir / "plugin.yaml")
+    token = set_hermes_home_override(tmp_path)
+    manager = MemoryManager()
+    db = make_db(tmp_path / "session.sqlite", "tenant:hermes-session")
+    try:
+        config = load_config()
+        config["memory"]["provider"] = "heartwood"
+        save_config(config)
+        provider = load_memory_provider(load_config()["memory"]["provider"])
+        assert isinstance(provider, MemoryProvider)
+        # Real database, deterministic test models; no model API/account or network.
+        provider.db = db
+        manager.add_provider(provider)
+        manager.initialize_all("session-demo", hermes_home=str(tmp_path))
+        assert provider.initialized
+        manager.sync_all("My project colour is aubergine.", "I will remember that.", session_id="session-demo")
+        assert manager.flush_pending(timeout=10), "Hermes background write did not finish"
+        manager.on_session_switch("session-next", parent_session_id="session-demo")
+        assert provider.session_id == "session-next"
+        recall = json.loads(manager.handle_tool_call("heartwood_recall", {"cue": "project colour"}))
+        assert any("aubergine" in row["content"] for row in recall["results"]), recall
+        prefetched = manager.prefetch_all("What is my project colour?", session_id="session-next")
+        assert "aubergine" in prefetched
+    finally:
+        manager.shutdown_all()
+        db.close()
+        reset_hermes_home_override(token)
 
 
 def test_hermes_lifecycle_governance_round_trip(tmp_path: Path) -> None:

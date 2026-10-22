@@ -1,0 +1,25 @@
+# Draft only; set the reviewed merge commit and validate before submission.
+name: heartwood
+title: Heartwood Memory
+repo: https://github.com/jermayne36/heartwood-memory
+sha: REPLACE_WITH_REVIEWED_MERGED_COMMIT_SHA
+subdir: plugins/hermes
+version: "0.1.0"
+description: >-
+  Local evaluation memory provider with automatic turn capture and
+  heartwood_recall, heartwood_remember and heartwood_forget tools.
+  Disclosure — completed conversation turns are stored in a local SQLite
+  database; recall can search across sessions in the configured tenant.
+  Heartwood's default embedding and reranking models may be downloaded
+  from Hugging Face on first use. The forget tool erases the named subject.
+maintainer: jermayne36
+tier: community
+category: memory
+requires_hermes: ">=0.22.4"
+docs_url: https://github.com/jermayne36/heartwood-memory/tree/main/plugins/hermes#readme
+capabilities:
+  # Hermes registers provider tools separately from general plugin tools.
+  provides_tools: []
+  provides_hooks: []
+  provides_middleware: []
+  requires_env: []
