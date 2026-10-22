@@ -1,0 +1,14 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "heartwood",
+  "version": "0.1.0",
+  "description": "Recall local Heartwood memories with provenance; propose memory writes for user review.",
+  "author": {
+    "name": "Heartwood Memory",
+    "url": "https://github.com/jermayne36"
+  },
+  "homepage": "https://heartwoodmemory.com/",
+  "repository": "https://github.com/jermayne36/heartwood-memory",
+  "license": "BUSL-1.1",
+  "keywords": ["memory", "provenance", "mcp", "read-only"]
+}
