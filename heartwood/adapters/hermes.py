@@ -4,6 +4,8 @@ When Hermes Agent is installed, ``HeartwoodHermesMemoryProvider`` subclasses the
 real ``agent.memory_provider.MemoryProvider`` ABC. When Hermes is absent, the
 same class remains importable so the rest of Heartwood's adapter package keeps
 working without a Hermes runtime dependency.
+
+Contract re-tested with Hermes v0.22.4 (4d04303818b61bf3aa09278af48356315515965b).
 """
 from __future__ import annotations
 
@@ -145,6 +147,10 @@ class HeartwoodHermesMemoryProvider(HermesMemoryProviderABC):
     def system_prompt_block(self) -> str:
         return "Heartwood Memory is active: recall is policy-enforced and provenance-tracked."
 
+    def on_session_switch(self, new_session_id: str, **kwargs: Any) -> None:
+        """Follow Hermes /resume, /branch and /new without reopening the profile store."""
+        self.session_id = new_session_id or "default"
+
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if not self.auto_recall or not query:
             return ""
@@ -178,6 +184,7 @@ class HeartwoodHermesMemoryProvider(HermesMemoryProviderABC):
         *,
         session_id: str = "",
         messages: list[dict[str, Any]] | None = None,
+        turn_author: dict[str, Any] | None = None,
     ) -> None:
         if not self.auto_retain:
             return

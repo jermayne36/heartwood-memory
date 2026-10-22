@@ -1,0 +1,10 @@
+name: heartwood
+version: "0.1.0"
+description: "Local Heartwood evaluation memory provider for Hermes."
+requires_hermes: ">=0.22.4"
+python_dependencies:
+  - "heartwood-memory==0.2.10"
+provides_tools: []
+provides_hooks: []
+provides_middleware: []
+requires_env: []
