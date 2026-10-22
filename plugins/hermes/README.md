@@ -75,9 +75,10 @@ skip. With it set, missing Hermes or a different checkout fails. A subprocess
 positive control proves missing Hermes produces a collection error, not a skip.
 
 `check_release.sh` runs lint and the opted-in real-Hermes contract. The repository
-release workflow must invoke this check before publishing a release. Automatic
-release-workflow enforcement is pending; current release CI does not yet require
-the integration contract.
+release workflow now enforces this check after its standard lint/test gate and
+before building or signing release artifacts. It installs the pinned Hermes
+v0.22.4 checkout in an isolated Python 3.14 venv; a missing dependency, wrong
+checkout, or contract failure stops the release.
 
 ## Catalog staging
 
