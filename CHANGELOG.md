@@ -12,9 +12,17 @@ All notable changes to `heartwood-memory` are documented here.
   - A key is never written over a shredded tombstone. When two writers create a new subject's first key at once, both use the same key.
   - With the sqlite-vec index, no vector is stored for a row that is already gone, and a process that opened the store before another process created the vector table can now remove vectors from it.
 - `remember()` writes the row, its provenance edges, its lineage and its audit row in one transaction, with or without `supersedes`.
+- `forget(mode="hard")` no longer leaves sqlite-vec vectors behind. These vectors are embeddings of the erased plaintext, stored in the shared database file. Before, a process that crashed between the row purge and vector removal kept them, and so did any purge by a process using the default numpy index. Reopening the store kept them as well. Now:
+  - The purge deletes the purged rows' vectors in the same transaction as the rows, whichever index the erasing process uses.
+  - If the store holds a vector table and sqlite-vec cannot be loaded (the `recall` extra is missing, or this Python's `sqlite3` cannot load extensions), `forget(mode="hard")` raises `RuntimeError` before shredding the key, so nothing changes. If the table appears after that check, the purge raises and rolls back. The key stays shredded, the rows stay unreadable and no receipt is issued. Install the extra and call `forget` again to finish the purge.
+  - Opening a store with `index="sqlite-vec"` drops every vector whose memory row is gone, including vectors an earlier version left behind.
+
+### Fixed
+- A store that already held sqlite-vec vectors can be opened with `index="sqlite-vec"` again. Opening it used to fail with `UNIQUE constraint failed on heartwood_vec primary key`, because vec0 ignores `INSERT OR REPLACE`. A vector is now replaced by deleting the old one first, in the same transaction.
 
 ### Changed
 - `Store.insert_memory` is removed: every write goes through `Store.insert_memory_superseding`. `Store.put_key` returns `False` instead of reactivating a shredded subject. `Store.create_key` and `Store.purge_subject` are new.
+- `Store.require_vector_erasure`, `Store.drop_orphan_vectors`, `Store.vector_table_exists`, `Store.sqlite_vec` and `heartwood.store.load_sqlite_vec` are new. `SqliteVecIndex` loads sqlite-vec through the store and re-adds vectors on rebuild only while their rows exist.
 
 ## [0.2.10] - 2026-10-09
 

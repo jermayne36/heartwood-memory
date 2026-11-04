@@ -116,6 +116,11 @@ db = Heartwood(
 
 - **Vector index** → `index="sqlite-vec"` (asg017): SQLite-native ANN; numpy
   brute-force is the default. `index="auto"` tries sqlite-vec, falls back.
+  sqlite-vec keeps its vectors in the store file, where every process sees
+  them. `forget(mode="hard")` deletes the purged rows' vectors in the purge
+  transaction, whatever index the erasing process uses. Once any process has
+  created that table, hard erasure needs sqlite-vec installed in every process
+  that erases. Without it, `forget` raises before shredding the key.
 - **Embedder** → `heartwood.models.embedder("embeddinggemma" | "bge-m3" | "qwen3")`.
 - **Reranker** → `heartwood.models.reranker("bge-v2" | "mxbai" | "jina")`.
 - Still pluggable: pass any `(callable, name)` pair. For typed recall, a callable

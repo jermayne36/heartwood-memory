@@ -94,16 +94,10 @@ class SqliteVecIndex(VectorIndex):
     name = "sqlite-vec"
 
     def __init__(self, store):
-        try:
-            import sqlite_vec  # raises if unavailable -> caller falls back in auto mode
-        except ModuleNotFoundError as exc:
-            raise RuntimeError(
-                'sqlite-vec index requires the recall extra. Run: python -m pip install -e ".[recall,mcp]"'
-            ) from exc
+        # Raises RuntimeError if unavailable -> caller falls back in auto mode.
+        sqlite_vec = store.sqlite_vec("sqlite-vec index")
+        self._store = store
         self.conn = store.conn
-        self.conn.enable_load_extension(True)
-        sqlite_vec.load(self.conn)
-        self.conn.enable_load_extension(False)
         self._serialize = sqlite_vec.serialize_float32
         self._dim = None
 
@@ -119,38 +113,47 @@ class SqliteVecIndex(VectorIndex):
     def add(self, mem_id, tenant, vector):
         if vector is None:
             return
-        v = np.asarray(vector, dtype=np.float32)
-        self._ensure(len(v))
-        self.conn.execute("INSERT OR REPLACE INTO heartwood_vec(memid,tenant,emb) VALUES (?,?,?)",
-                          (mem_id, tenant, self._serialize(v.tolist())))
-        self.conn.commit()
+        self._put(mem_id, "INSERT INTO heartwood_vec(memid,tenant,emb) VALUES (?,?,?)",
+                  (mem_id, tenant, self._blob(vector)))
 
     def add_if_stored(self, mem_id, tenant, vector):
         if vector is None:
             return
-        v = np.asarray(vector, dtype=np.float32)
-        self._ensure(len(v))
         # @fail-closed(erasure-final-for-writes): one statement stores the
         # vector only while its memory row exists, so a vector arriving after an
         # erasure purged that row is never kept.
-        self.conn.execute(
-            "INSERT OR REPLACE INTO heartwood_vec(memid,tenant,emb) "
+        self._put(
+            mem_id,
+            "INSERT INTO heartwood_vec(memid,tenant,emb) "
             "SELECT ?,?,? WHERE EXISTS (SELECT 1 FROM memories WHERE id=?)",
-            (mem_id, tenant, self._serialize(v.tolist()), mem_id),
+            (mem_id, tenant, self._blob(vector), mem_id),
         )
-        self.conn.commit()
+
+    def _blob(self, vector) -> bytes:
+        v = np.asarray(vector, dtype=np.float32)
+        self._ensure(len(v))
+        return self._serialize(v.tolist())
+
+    def _put(self, mem_id: str, insert_sql: str, args: tuple) -> None:
+        """Replace ``mem_id``'s vector in one transaction.
+
+        vec0 does not honour INSERT OR REPLACE: a second insert for a stored id
+        fails its primary key. The old vector is deleted first instead.
+        """
+        try:
+            self.conn.execute("DELETE FROM heartwood_vec WHERE memid=?", (mem_id,))
+            self.conn.execute(insert_sql, args)
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
 
     def remove(self, mem_id):
         # Another process may have created the table after this one opened it.
-        if self._dim is None and not self._table_exists():
+        if self._dim is None and not self._store.vector_table_exists():
             return
         self.conn.execute("DELETE FROM heartwood_vec WHERE memid=?", (mem_id,))
         self.conn.commit()
-
-    def _table_exists(self) -> bool:
-        return self.conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='heartwood_vec'"
-        ).fetchone() is not None
 
     def search(self, tenant, query_vec, n, allowed_ids=None):
         if self._dim is None or n <= 0 or (allowed_ids is not None and not allowed_ids):
@@ -194,8 +197,13 @@ class SqliteVecIndex(VectorIndex):
         if self._dim is not None:
             self.conn.execute("DELETE FROM heartwood_vec")
             self.conn.commit()
+        else:
+            # @fail-closed(vector-orphans-dropped): this process did not create
+            # the table, which may hold vectors whose rows were purged without
+            # them. Every open drops those before re-adding the live rows.
+            store.drop_orphan_vectors()
         for mid, tenant, emb in store.all_embeddings():
-            self.add(mid, tenant, emb)
+            self.add_if_stored(mid, tenant, emb)
 
 
 def make_index(spec, store) -> VectorIndex:

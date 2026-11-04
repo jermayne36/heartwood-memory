@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT))
 from heartwood import Heartwood, LocalKmsCustodian  # noqa: E402
 from heartwood.importers.markdown import dev_models  # noqa: E402
 from heartwood.key_lifecycle import rewrap_tenant_keys  # noqa: E402
+from heartwood.store import load_sqlite_vec  # noqa: E402
 
 TENANT = "tenant:concurrent-erasure"
 CUSTODY_ROOT_HEX = (bytes([59]) * 32).hex()
@@ -393,3 +394,157 @@ def test_sqlite_vec_erasure_by_a_process_opened_before_the_write(tmp_path):
         eraser.close()
     assert _vector_ids(db_path) == []
     _assert_erased(db_path, subject)
+
+
+class _ProcessDied(BaseException):
+    """Stands in for a crash: nothing in Heartwood catches a BaseException."""
+
+
+def _die() -> None:
+    raise _ProcessDied
+
+
+# @positive-control(erasure-vectors-purged)
+def test_sqlite_vec_vectors_are_gone_when_the_eraser_dies_right_after_the_purge(tmp_path):
+    pytest.importorskip("sqlite_vec")
+    db_path, subject = tmp_path / "heartwood.db", "customer:vector"
+    eraser = _client(db_path, index="sqlite-vec")
+    try:
+        eraser.remember("fact with a stored vector", subject=subject, created_by="agent:writer")
+        fired = _after_first_call(eraser.store, "purge_subject", _die)
+        with pytest.raises(_ProcessDied):
+            eraser.forget(subject, mode="hard", actor="agent:eraser", reason="test")
+        assert fired
+    finally:
+        eraser.close()
+    assert _vector_ids(db_path) == []
+    _assert_erased(db_path, subject)
+
+
+def test_a_failed_purge_keeps_rows_and_vectors_together(tmp_path):
+    pytest.importorskip("sqlite_vec")
+    db_path, subject = tmp_path / "heartwood.db", "customer:vector"
+    eraser = _client(db_path, index="sqlite-vec")
+    try:
+        mem_id = eraser.remember("fact with a stored vector", subject=subject,
+                                 created_by="agent:writer")
+
+        def fail(*_args):
+            raise sqlite3.OperationalError("simulated failure inside the purge")
+
+        eraser.store._delete_memory_rows = fail
+        with pytest.raises(sqlite3.OperationalError, match="simulated failure"):
+            eraser.forget(subject, mode="hard", actor="agent:eraser", reason="test")
+        # The vector delete rolled back with the row delete.
+        assert (_rows_naming(db_path, subject), _vector_ids(db_path)) == ([mem_id], [mem_id])
+        del eraser.store._delete_memory_rows
+        eraser.forget(subject, mode="hard", actor="agent:eraser", reason="retry")
+    finally:
+        eraser.close()
+    assert _vector_ids(db_path) == []
+    _assert_erased(db_path, subject)
+
+
+def test_numpy_eraser_removes_vectors_a_sqlite_vec_process_stored(tmp_path):
+    pytest.importorskip("sqlite_vec")
+    db_path, subject = tmp_path / "heartwood.db", "customer:vector"
+    eraser = _client(db_path, index="numpy")
+    try:
+        _peer(db_path, "remember", subject, content="fact indexed by another process",
+              index="sqlite-vec")
+        assert len(_vector_ids(db_path)) == 1
+        receipt = eraser.forget(subject, mode="hard", actor="agent:eraser", reason="test")
+    finally:
+        eraser.close()
+    assert receipt["purged"] == 1
+    assert _vector_ids(db_path) == []
+    _assert_erased(db_path, subject)
+
+
+# @positive-control(erasure-needs-sqlite-vec)
+def test_eraser_without_sqlite_vec_refuses_before_the_shred(tmp_path, monkeypatch):
+    pytest.importorskip("sqlite_vec")
+    db_path, subject = tmp_path / "heartwood.db", "customer:vector"
+    peer = _peer(db_path, "remember", subject, content="fact indexed by another process",
+                 index="sqlite-vec")
+    eraser = _client(db_path, index="numpy")
+    try:
+        with monkeypatch.context() as patched:
+            patched.setitem(sys.modules, "sqlite_vec", None)
+            with pytest.raises(RuntimeError, match="recall extra"):
+                eraser.forget(subject, mode="hard", actor="agent:eraser", reason="test")
+    finally:
+        eraser.close()
+    # Refused before anything changed: the key is live, the row and vector remain.
+    assert _key_state(db_path, subject) == [("active", 0)]
+    assert (_rows_naming(db_path, subject), _vector_ids(db_path)) == ([peer["id"]], [peer["id"]])
+
+
+def test_vector_table_created_during_erasure_without_sqlite_vec_fails_closed(
+    tmp_path, monkeypatch,
+):
+    pytest.importorskip("sqlite_vec")
+    db_path, subject = tmp_path / "heartwood.db", "customer:vector"
+    eraser = _client(db_path, index="numpy")
+    peer: dict = {}
+    try:
+        mine = eraser.remember("fact written before the vector table existed", subject=subject,
+                               created_by="agent:writer")
+        with monkeypatch.context() as patched:
+            patched.setitem(sys.modules, "sqlite_vec", None)
+            # The vector table appears after the pre-shred check passed.
+            fired = _before_first_call(eraser.keys, "shred", lambda: peer.update(_peer(
+                db_path, "remember", subject, content="fact indexed by another process",
+                index="sqlite-vec",
+            )))
+            with pytest.raises(RuntimeError, match="recall extra"):
+                eraser.forget(subject, mode="hard", actor="agent:eraser", reason="test")
+            assert fired
+        # The key is gone, so the rows are unreadable, but nothing reported success.
+        assert _key_state(db_path, subject) == [("shredded", 1)]
+        assert _rows_naming(db_path, subject) == sorted([mine, peer["id"]])
+        # The peer's rebuild indexed both rows; both vectors survive the rollback.
+        assert sorted(_vector_ids(db_path)) == sorted([mine, peer["id"]])
+        receipt = eraser.forget(subject, mode="hard", actor="agent:eraser", reason="retry")
+    finally:
+        eraser.close()
+    assert receipt["purged"] == 2
+    assert _vector_ids(db_path) == []
+    _assert_erased(db_path, subject)
+
+
+def test_sqlite_vec_loader_refuses_a_sqlite3_that_cannot_load_extensions():
+    pytest.importorskip("sqlite_vec")
+
+    class ConnectionWithoutExtensions:
+        """sqlite3 built without extension loading has no enable_load_extension."""
+
+    with pytest.raises(RuntimeError, match="can load extensions"):
+        load_sqlite_vec(ConnectionWithoutExtensions(), "hard erasure")
+
+
+# -- vectors orphaned before vector removal joined the purge ---------------- #
+def _orphan_a_vector(db_path: Path, mem_id: str) -> None:
+    """Delete a memory row but not its vector, as a crash after the old purge did."""
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute("DELETE FROM memories WHERE id=?", (mem_id,))
+        conn.commit()
+
+
+# @positive-control(vector-orphans-dropped)
+@pytest.mark.parametrize("keep_live_row", [True, False])
+def test_reopening_with_sqlite_vec_drops_vectors_whose_rows_are_gone(tmp_path, keep_live_row):
+    pytest.importorskip("sqlite_vec")
+    db_path = tmp_path / "heartwood.db"
+    db = _client(db_path, index="sqlite-vec")
+    try:
+        orphan = db.remember("fact whose purge left its vector", subject="customer:old",
+                             created_by="agent:writer")
+        live = (db.remember("fact that stays", subject="customer:live",
+                            created_by="agent:writer") if keep_live_row else None)
+    finally:
+        db.close()
+    _orphan_a_vector(db_path, orphan)
+    assert orphan in _vector_ids(db_path)
+    _client(db_path, index="sqlite-vec").close()
+    assert _vector_ids(db_path) == ([live] if keep_live_row else [])
