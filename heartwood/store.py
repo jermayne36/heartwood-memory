@@ -74,6 +74,11 @@ _MEMORY_META_COLUMNS = (
 )
 
 
+def erased_subject_error(subject: str) -> KeyError:
+    """The error every write path raises for a subject whose key is shredded."""
+    return KeyError(f"subject {subject} has been erased (key shredded)")
+
+
 class Store:
     def __init__(self, path: str = ":memory:"):
         self.path = str(path)
@@ -133,10 +138,6 @@ class Store:
         self.conn.close()
 
     # -- memories -------------------------------------------------------- #
-    def insert_memory(self, m: dict, content_enc: bytes, emb):
-        self._insert_memory_row(m, content_enc, emb)
-        self.conn.commit()
-
     def insert_memory_superseding(
         self,
         m: dict,
@@ -147,19 +148,30 @@ class Store:
         derived_from: tuple[str, ...],
         principal: str,
         audit_body: str,
+        live_parents: tuple[str, ...] = (),
     ) -> dict | None:
-        """Insert a memory, supersede prior rows and audit both in one transaction.
+        """Insert a memory with its edges, lineage and audit row in one transaction.
 
-        Each superseded entry carries the ``expected`` field values its retirement
-        was checked against (review_state, epistemic, created_by, content_hash).
-        If any row no longer matches, nothing is written and None is returned.
+        ``superseded`` may be empty. Each entry carries the ``expected`` field
+        values its retirement was checked against (review_state, epistemic,
+        created_by, content_hash). If any row no longer matches, nothing is
+        written and None is returned.
         No provenance edge links the new row to a superseded one: the erasure
         cascade follows every edge, so an edge would make forgetting the old
         record's subject also purge its replacement.
+
+        Nothing is written either if a subject the row names has been erased
+        (KeyError), or if a parent in ``live_parents``, which existed when the
+        caller derived the row's policy from it, is gone (RuntimeError).
         """
         tenant = m["tenant"]
         try:
             self.conn.execute("BEGIN IMMEDIATE")
+            # @fail-closed(erasure-final-for-writes): checked under the write
+            # lock, so an erasure either commits first and this write is refused,
+            # or commits later and its purge selects this row.
+            self._refuse_erased_subjects(tenant, (m["subject"], *m.get("subject_ids", ())))
+            self._refuse_missing_parents(live_parents)
             self._insert_memory_row(m, content_enc, emb)
             if not self._supersede_rows(tenant, superseded):
                 self.conn.rollback()
@@ -211,6 +223,33 @@ class Store:
         except Exception:
             self.conn.rollback()
             raise
+
+    def _refuse_erased_subjects(self, tenant: str, subjects) -> None:
+        """Raise if any subject has a shredded key; the caller owns the transaction."""
+        row = self.conn.execute(
+            "SELECT subject FROM keys WHERE tenant=? AND state='shredded' "
+            "AND subject IN (SELECT value FROM json_each(?)) ORDER BY subject LIMIT 1",
+            (tenant, json.dumps(sorted(set(subjects)))),
+        ).fetchone()
+        if row is not None:
+            raise erased_subject_error(row["subject"])
+
+    def _refuse_missing_parents(self, parent_ids) -> None:
+        """Raise if a parent memory is gone; the caller owns the transaction."""
+        wanted = sorted(set(parent_ids))
+        if not wanted:
+            return
+        present = {
+            r["id"] for r in self.conn.execute(
+                "SELECT id FROM memories WHERE id IN (SELECT value FROM json_each(?))",
+                (json.dumps(wanted),),
+            )
+        }
+        missing = [parent for parent in wanted if parent not in present]
+        if missing:
+            raise RuntimeError(
+                "a derived_from parent was removed during remember: " + ", ".join(missing)
+            )
 
     def _supersede_rows(self, tenant: str, superseded: list[dict]) -> bool:
         """Move each row to ``superseded`` if it still matches; the caller owns the transaction."""
@@ -371,13 +410,46 @@ class Store:
         return (r["content_enc"], r["index_text_enc"], r["subject"]) if r else (None, None, None)
 
     def delete_memory(self, mem_id: str):
+        self._delete_memory_rows(mem_id)
+        self.conn.commit()
+
+    def _delete_memory_rows(self, mem_id: str) -> None:
         self.conn.execute("DELETE FROM memories WHERE id=?", (mem_id,))
         self.conn.execute("DELETE FROM prov_edges WHERE child=? OR parent=?", (mem_id, mem_id))
         self.conn.execute(
             "DELETE FROM deletion_lineage WHERE artifact_id IN (?,?)",
             (mem_id, f"emb:{mem_id}"),
         )
-        self.conn.commit()
+
+    def purge_subject(
+        self, tenant: str, subject: str, *, seed=(),
+    ) -> tuple[list[str], set[str]]:
+        """Delete an erased subject's memories, their descendants and lineage at once.
+
+        Rows are selected again under the write lock, so a write that committed
+        after the caller selected ``seed`` is purged too. Returns the purged ids
+        and the cascade: the ids reached only through provenance edges.
+        """
+        try:
+            self.conn.execute("BEGIN IMMEDIATE")
+            selected = (
+                set(seed)
+                | set(self.subject_ids(tenant, subject))
+                | set(self.lineage_memory_ids(tenant, subject))
+            )
+            cascade = self.descendants(selected)
+            purged = sorted(selected | cascade)
+            for mem_id in purged:
+                self._delete_memory_rows(mem_id)
+            self.conn.execute(
+                "DELETE FROM deletion_lineage WHERE tenant=? AND subject=?",
+                (tenant, subject),
+            )
+            self.conn.commit()
+            return purged, cascade
+        except Exception:
+            self.conn.rollback()
+            raise
 
     def update_epistemic(self, mem_id: str, epistemic: str, *,
                          created_by: str | None = None,
@@ -688,10 +760,31 @@ class Store:
             for r in rows
         ]
 
-    def put_key(self, tenant, subject, key: bytes):
-        self.conn.execute("INSERT OR REPLACE INTO keys VALUES (?,?,?,?)",
-                          (tenant, subject, key, "active"))
+    def create_key(self, tenant, subject, envelope: bytes) -> tuple[bytes | None, str | None]:
+        """Store a subject's first key unless it has a row already; return the stored row.
+
+        An existing row always wins: a key another writer stored first stays the
+        one every writer encrypts with, and a shredded tombstone stays shredded.
+        """
+        self.conn.execute(
+            "INSERT INTO keys (tenant,subject,dek,state) VALUES (?,?,?,'active') "
+            "ON CONFLICT(tenant,subject) DO NOTHING",
+            (tenant, subject, envelope),
+        )
         self.conn.commit()
+        return self.get_key(tenant, subject)
+
+    def put_key(self, tenant, subject, key: bytes) -> bool:
+        """Store a key envelope for a subject; return False if the subject is erased."""
+        # @fail-closed(erasure-tombstone-final): a shredded row is never reactivated.
+        cur = self.conn.execute(
+            "INSERT INTO keys (tenant,subject,dek,state) VALUES (?,?,?,'active') "
+            "ON CONFLICT(tenant,subject) DO UPDATE SET dek=excluded.dek, state='active' "
+            "WHERE keys.state IS NOT 'shredded'",
+            (tenant, subject, key),
+        )
+        self.conn.commit()
+        return cur.rowcount == 1
 
     def shred_key(self, tenant, subject):
         self.conn.execute(

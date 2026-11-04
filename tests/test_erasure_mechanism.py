@@ -45,19 +45,19 @@ def _run_erasure_mechanism(*, initiate_shred: bool) -> None:
 
             events: list[tuple[str, datetime]] = []
             real_shred = db.keys.shred
-            real_delete_memory = db.store.delete_memory
+            real_purge_subject = db.store.purge_subject
 
             def observed_shred(tenant: str, subject: str) -> None:
                 events.append(("shred", datetime.now(timezone.utc)))
                 if initiate_shred:
                     real_shred(tenant, subject)
 
-            def observed_delete_memory(memory_id: str) -> None:
+            def observed_purge_subject(*args, **kwargs):
                 events.append(("purge", datetime.now(timezone.utc)))
-                real_delete_memory(memory_id)
+                return real_purge_subject(*args, **kwargs)
 
             db.keys.shred = observed_shred
-            db.store.delete_memory = observed_delete_memory
+            db.store.purge_subject = observed_purge_subject
 
             started_at = datetime.now(timezone.utc)
             receipt = db.forget(

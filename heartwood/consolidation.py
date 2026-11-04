@@ -287,7 +287,7 @@ def _source_spans(client, members: tuple[dict[str, Any], ...]) -> list[dict[str,
 
     The persistence path is ``Heartwood.remember``: it removes these ``text``
     values and encrypts them into ``source_spans_enc`` before the row reaches
-    ``Store.insert_memory``.
+    ``Store.insert_memory_superseding``.
     """
     spans = []
     for member in members:

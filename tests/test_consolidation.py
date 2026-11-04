@@ -112,6 +112,7 @@ def test_consolidation_module_has_static_additive_only_import_guard():
         ("heartwood.client", "purge"),
         ("heartwood.store", "delete_memory"),
         ("heartwood.store", "delete_subject"),
+        ("heartwood.store", "purge_subject"),
     }
     imports = set()
     dangerous_attrs = set()
@@ -127,6 +128,7 @@ def test_consolidation_module_has_static_additive_only_import_guard():
             "purge",
             "delete_memory",
             "delete_subject",
+            "purge_subject",
         }:
             dangerous_attrs.add(node.attr)
 
@@ -136,6 +138,7 @@ def test_consolidation_module_has_static_additive_only_import_guard():
     assert ".purge(" not in source
     assert ".delete_memory(" not in source
     assert ".delete_subject(" not in source
+    assert ".purge_subject(" not in source
 
 
 def test_find_consolidation_clusters_detects_exact_and_near_duplicates():

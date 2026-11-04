@@ -20,6 +20,16 @@ class VectorIndex:
     name = "abstract"
 
     def add(self, mem_id: str, tenant: str, vector) -> None: ...
+
+    def add_if_stored(self, mem_id: str, tenant: str, vector) -> None:
+        """Add a just-written memory's vector unless its row is already gone.
+
+        An index that keeps vectors in the shared database file must check the
+        row and insert the vector in one statement, so a row that an erasure in
+        another process has purged is never indexed again.
+        """
+        self.add(mem_id, tenant, vector)
+
     def remove(self, mem_id: str) -> None: ...
     def search(self, tenant: str, query_vec, n: int, allowed_ids=None) -> list[tuple[str, float]]: ...
     def rebuild(self, store) -> None: ...
@@ -115,10 +125,32 @@ class SqliteVecIndex(VectorIndex):
                           (mem_id, tenant, self._serialize(v.tolist())))
         self.conn.commit()
 
+    def add_if_stored(self, mem_id, tenant, vector):
+        if vector is None:
+            return
+        v = np.asarray(vector, dtype=np.float32)
+        self._ensure(len(v))
+        # @fail-closed(erasure-final-for-writes): one statement stores the
+        # vector only while its memory row exists, so a vector arriving after an
+        # erasure purged that row is never kept.
+        self.conn.execute(
+            "INSERT OR REPLACE INTO heartwood_vec(memid,tenant,emb) "
+            "SELECT ?,?,? WHERE EXISTS (SELECT 1 FROM memories WHERE id=?)",
+            (mem_id, tenant, self._serialize(v.tolist()), mem_id),
+        )
+        self.conn.commit()
+
     def remove(self, mem_id):
-        if self._dim is not None:
-            self.conn.execute("DELETE FROM heartwood_vec WHERE memid=?", (mem_id,))
-            self.conn.commit()
+        # Another process may have created the table after this one opened it.
+        if self._dim is None and not self._table_exists():
+            return
+        self.conn.execute("DELETE FROM heartwood_vec WHERE memid=?", (mem_id,))
+        self.conn.commit()
+
+    def _table_exists(self) -> bool:
+        return self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='heartwood_vec'"
+        ).fetchone() is not None
 
     def search(self, tenant, query_vec, n, allowed_ids=None):
         if self._dim is None or n <= 0 or (allowed_ids is not None and not allowed_ids):

@@ -2,6 +2,20 @@
 
 All notable changes to `heartwood-memory` are documented here.
 
+## [Unreleased]
+
+### Security
+- Hard erasure stays final when another process writes to the same store. Before, a write that was in progress when `forget(mode="hard")` ran could still land a row for the erased subject after the receipt was issued, and the first write for a new subject could overwrite the erasure's shredded-key tombstone with a working key. Now:
+  - `remember()` checks inside its write transaction that no subject it names (the subject or any `subject_ids` alias) has been erased, and raises `KeyError` if one has. A later write that names an erased alias is refused the same way.
+  - `remember(derived_from=...)` raises `RuntimeError` if a parent it read was deleted before the write committed.
+  - `forget(mode="hard")` selects the rows to purge again, in one transaction, after the key is shredded.
+  - A key is never written over a shredded tombstone. When two writers create a new subject's first key at once, both use the same key.
+  - With the sqlite-vec index, no vector is stored for a row that is already gone, and a process that opened the store before another process created the vector table can now remove vectors from it.
+- `remember()` writes the row, its provenance edges, its lineage and its audit row in one transaction, with or without `supersedes`.
+
+### Changed
+- `Store.insert_memory` is removed: every write goes through `Store.insert_memory_superseding`. `Store.put_key` returns `False` instead of reactivating a shredded subject. `Store.create_key` and `Store.purge_subject` are new.
+
 ## [0.2.10] - 2026-10-09
 
 ### Security
