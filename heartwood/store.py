@@ -13,6 +13,7 @@ import json
 import secrets
 import sqlite3
 import time
+from types import ModuleType
 
 import numpy as np
 
@@ -79,11 +80,45 @@ def erased_subject_error(subject: str) -> KeyError:
     return KeyError(f"subject {subject} has been erased (key shredded)")
 
 
+# The vec0 table SqliteVecIndex keeps in the store file, shared by every process.
+VECTOR_TABLE = "heartwood_vec"
+_RECALL_EXTRA_INSTALL = 'python -m pip install -e ".[recall,mcp]"'
+_ERASURE_NEEDS = "hard erasure of a store that holds sqlite-vec vectors"
+
+
+def load_sqlite_vec(conn: sqlite3.Connection, needed_for: str) -> ModuleType:
+    """Load the sqlite-vec extension into ``conn`` and return the module.
+
+    Raises RuntimeError naming ``needed_for`` when sqlite-vec is not installed
+    or this Python's sqlite3 cannot load extensions.
+    """
+    try:
+        import sqlite_vec
+    except ImportError as exc:
+        raise RuntimeError(
+            f"{needed_for} requires the recall extra. Run: {_RECALL_EXTRA_INSTALL}"
+        ) from exc
+    try:
+        conn.enable_load_extension(True)
+    except AttributeError as exc:
+        raise RuntimeError(
+            f"{needed_for} requires a Python whose sqlite3 module can load extensions"
+        ) from exc
+    try:
+        sqlite_vec.load(conn)
+    except sqlite3.Error as exc:
+        raise RuntimeError(f"{needed_for} could not load sqlite-vec: {exc}") from exc
+    finally:
+        conn.enable_load_extension(False)
+    return sqlite_vec
+
+
 class Store:
     def __init__(self, path: str = ":memory:"):
         self.path = str(path)
         self.conn = sqlite3.connect(path, timeout=30.0, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        self._sqlite_vec = None   # loaded on first need; see sqlite_vec()
         self.conn.execute("PRAGMA busy_timeout=30000")
         self.conn.execute("PRAGMA secure_delete=ON")
         if path != ":memory:":
@@ -427,8 +462,10 @@ class Store:
         """Delete an erased subject's memories, their descendants and lineage at once.
 
         Rows are selected again under the write lock, so a write that committed
-        after the caller selected ``seed`` is purged too. Returns the purged ids
-        and the cascade: the ids reached only through provenance edges.
+        after the caller selected ``seed`` is purged too. Their sqlite-vec
+        vectors, if this file holds any, are deleted in the same transaction.
+        Returns the purged ids and the cascade: the ids reached only through
+        provenance edges.
         """
         try:
             self.conn.execute("BEGIN IMMEDIATE")
@@ -439,6 +476,10 @@ class Store:
             )
             cascade = self.descendants(selected)
             purged = sorted(selected | cascade)
+            # @fail-closed(erasure-vectors-purged): vectors go with their rows
+            # in one transaction, whatever index this process uses, so no crash
+            # after the commit can leave an erased row's vector behind.
+            self._delete_vectors(purged)
             for mem_id in purged:
                 self._delete_memory_rows(mem_id)
             self.conn.execute(
@@ -447,6 +488,62 @@ class Store:
             )
             self.conn.commit()
             return purged, cascade
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    # -- derived vectors kept in this file by sqlite-vec ------------------- #
+    def vector_table_exists(self) -> bool:
+        """Whether a sqlite-vec process has created the vector table in this file."""
+        return self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (VECTOR_TABLE,),
+        ).fetchone() is not None
+
+    def sqlite_vec(self, needed_for: str) -> ModuleType:
+        """Load sqlite-vec into this connection once and return the module."""
+        if self._sqlite_vec is None:
+            self._sqlite_vec = load_sqlite_vec(self.conn, needed_for)
+        return self._sqlite_vec
+
+    def require_vector_erasure(self) -> None:
+        """Raise RuntimeError, before a hard erasure changes anything, if it
+        could not delete the sqlite-vec vectors this file holds."""
+        # @fail-closed(erasure-needs-sqlite-vec): only a process that can load
+        # sqlite-vec erases from a store that holds vectors.
+        if self.vector_table_exists():
+            self.sqlite_vec(_ERASURE_NEEDS)
+
+    def _delete_vectors(self, mem_ids: list[str]) -> None:
+        """Delete the stored vectors of ``mem_ids``; the caller owns the transaction."""
+        if not mem_ids or not self.vector_table_exists():
+            return
+        # @fail-closed(erasure-needs-sqlite-vec): the table can appear after
+        # require_vector_erasure passed. Raising here rolls the purge back.
+        self.sqlite_vec(_ERASURE_NEEDS)
+        self.conn.executemany(
+            f"DELETE FROM {VECTOR_TABLE} WHERE memid=?", [(mem_id,) for mem_id in mem_ids],
+        )
+
+    def drop_orphan_vectors(self) -> list[str]:
+        """Delete stored vectors whose memory row is gone and return their ids.
+
+        Such vectors are left by a purge that crashed before removing them, or
+        by an older version's purge from a process without sqlite-vec loaded.
+        """
+        if not self.vector_table_exists():
+            return []
+        self.sqlite_vec("dropping orphaned sqlite-vec vectors")
+        try:
+            self.conn.execute("BEGIN IMMEDIATE")
+            orphans = [r[0] for r in self.conn.execute(
+                f"SELECT memid FROM {VECTOR_TABLE} AS v WHERE NOT EXISTS "
+                "(SELECT 1 FROM memories AS m WHERE m.id = v.memid)"
+            )]
+            self.conn.executemany(
+                f"DELETE FROM {VECTOR_TABLE} WHERE memid=?", [(mem_id,) for mem_id in orphans],
+            )
+            self.conn.commit()
+            return orphans
         except Exception:
             self.conn.rollback()
             raise

@@ -1606,6 +1606,9 @@ class Heartwood:
             "custody_retention_floor_seconds": self.keys.custodian.retention_floor_seconds,
         }
         operation_id = "erase_" + secrets.token_hex(12)
+        # Refuse now, with nothing changed, if the purge could not delete the
+        # sqlite-vec vectors this file holds (sqlite-vec not installed here).
+        self.store.require_vector_erasure()
         # Resolve the complete primary + secondary subject selector before the
         # irreversible key shred.  The Store guard rejects malformed alias JSON.
         seed = sorted(
