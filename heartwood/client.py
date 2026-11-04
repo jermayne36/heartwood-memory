@@ -411,6 +411,8 @@ class Heartwood:
         )
         policy = policy or Policy()
         source = source or {}
+        # Parents read below must still exist when the row commits.
+        live_parents: list[str] = []
         # High-water-mark: a derived memory inherits the policy of its most-
         # restrictive parent (classification + role gate + pii). A summary of a
         # restricted source is itself restricted — it must not be readable by a
@@ -422,6 +424,7 @@ class Heartwood:
                 pm = self.store.get_meta(p)
                 if not pm:
                     continue
+                live_parents.append(p)
                 pii = pii or pm["pii"]
                 top_rank = max(top_rank, CLASSIFICATION_RANK[pm["classification"]])
                 if pm["roles"]:
@@ -500,36 +503,29 @@ class Heartwood:
                  "to": ReviewState.SUPERSEDED.value}
                 for target in superseded
             ]
-            # @fail-closed(remember-supersede-atomic): the new row, every
-            # retirement and the audit row commit together or not at all.
-            transition = self.store.insert_memory_superseding(
-                row, content_enc, emb,
-                superseded=superseded,
-                derived_from=tuple(derived_from),
-                principal=created_by,
-                audit_body=AuditLog.body(self.tenant, created_by, "remember", mem_id, detail),
+        # @fail-closed(remember-supersede-atomic): the new row, its edges and
+        # lineage, every retirement and the audit row commit together or not at
+        # all. The same transaction refuses a subject erased since the key read.
+        transition = self.store.insert_memory_superseding(
+            row, content_enc, emb,
+            superseded=superseded,
+            derived_from=tuple(derived_from),
+            live_parents=tuple(live_parents),
+            principal=created_by,
+            audit_body=AuditLog.body(self.tenant, created_by, "remember", mem_id, detail),
+        )
+        if transition is None:
+            raise RuntimeError(
+                "a superseded memory changed during remember: "
+                + ", ".join(target["id"] for target in superseded)
             )
-            if transition is None:
-                raise RuntimeError(
-                    "a superseded memory changed during remember: "
-                    + ", ".join(target["id"] for target in superseded)
-                )
-        else:
-            self.store.insert_memory(row, content_enc, emb)
         if indexed:
             self._cache_text_pair(mem_id, content, text_to_index)
             self._tokens_for_index_text(mem_id, text_to_index)
             self._bm25_corpus_cache.clear()
-            self.index.add(mem_id, self.tenant, emb)
-        if superseded:
-            if self.audit.after_append is not None:
-                self.audit.after_append()
-            return mem_id
-        for p in derived_from:
-            self.store.add_edge(mem_id, p)
-        self.store.register_lineage(mem_id, "memory", subject, self.tenant)
-        self.store.register_lineage(f"emb:{mem_id}", "embedding", subject, self.tenant)
-        self.audit.append(self.tenant, created_by, "remember", mem_id, detail)
+            self.index.add_if_stored(mem_id, self.tenant, emb)
+        if self.audit.after_append is not None:
+            self.audit.after_append()
         return mem_id
 
     def _superseded_targets(self, supersedes, *, principal: Principal | None,
@@ -1616,8 +1612,6 @@ class Heartwood:
             set(self.store.subject_ids(self.tenant, subject))
             | set(self.store.lineage_memory_ids(self.tenant, subject))
         )
-        cascade = self.store.descendants(seed)
-        to_purge = sorted(set(seed) | cascade)
         envelope_before, _state_before = self.store.get_key(self.tenant, subject)
         wrapped_before = bool(envelope_before is not None and is_wrapped_key(envelope_before))
 
@@ -1629,16 +1623,14 @@ class Heartwood:
                 "hard erasure did not make the subject key unusable: "
                 "a shredded key tombstone was not persisted"
             )
+        # @fail-closed(erasure-purge-after-shred): rows are selected again in the
+        # purge transaction, after the tombstone commits. A write that committed
+        # before the shred is purged here; every later write is refused.
+        to_purge, cascade = self.store.purge_subject(self.tenant, subject, seed=seed)
         for mem_id in to_purge:
             self._text_cache.pop(mem_id, None)
             self._token_cache.pop(mem_id, None)
-            self.store.delete_memory(mem_id)
             self.index.remove(mem_id)
-        self.store.conn.execute(
-            "DELETE FROM deletion_lineage WHERE tenant=? AND subject=?",
-            (self.tenant, subject),
-        )
-        self.store.conn.commit()
         self._bm25_corpus_cache.clear()
         purged, cascade_n = len(to_purge), len(cascade)
         response_payload = {

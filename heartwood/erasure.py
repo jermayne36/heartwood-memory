@@ -16,6 +16,7 @@ import base64
 import os
 
 from .key_custody import KeyCustodian, RawKeyCustodian, custodian_from_env, is_wrapped_key
+from .store import erased_subject_error
 
 try:
     from cryptography.fernet import Fernet
@@ -58,18 +59,27 @@ class KeyStore:
 
     def get_or_create(self, tenant: str, subject: str) -> bytes:
         envelope, state = self.store.get_key(tenant, subject)
-        if state == "shredded":
-            raise KeyError(f"subject {subject} has been erased (key shredded)")
-        if envelope is None:
+        if envelope is None and state != "shredded":
             key = new_key()
-            self.store.put_key(tenant, subject, self.custodian.wrap(tenant=tenant, subject=subject, dek=key))
-            return key
+            wrapped = self.custodian.wrap(tenant=tenant, subject=subject, dek=key)
+            # The store keeps whichever row exists first: an erasure's tombstone
+            # or another writer's key, which this writer then uses instead.
+            envelope, state = self.store.create_key(tenant, subject, wrapped)
+            if state != "shredded" and envelope == wrapped:
+                return key
+        if state == "shredded":
+            raise erased_subject_error(subject)
+        if envelope is None:
+            raise RuntimeError(f"subject {subject} has a key row without key material")
         if is_wrapped_key(envelope):
             return self.custodian.unwrap(tenant=tenant, subject=subject, envelope=envelope)
         if isinstance(self.custodian, RawKeyCustodian):
             return envelope
         # First access after enabling custody on an old raw-local store.
-        self.store.put_key(tenant, subject, self.custodian.wrap(tenant=tenant, subject=subject, dek=envelope))
+        if not self.store.put_key(
+            tenant, subject, self.custodian.wrap(tenant=tenant, subject=subject, dek=envelope),
+        ):
+            raise erased_subject_error(subject)
         return envelope
 
     def get(self, tenant: str, subject: str) -> bytes | None:
@@ -81,7 +91,10 @@ class KeyStore:
         if isinstance(self.custodian, RawKeyCustodian):
             return envelope
         # Migrate old raw-local stores lazily when custody is enabled.
-        self.store.put_key(tenant, subject, self.custodian.wrap(tenant=tenant, subject=subject, dek=envelope))
+        if not self.store.put_key(
+            tenant, subject, self.custodian.wrap(tenant=tenant, subject=subject, dek=envelope),
+        ):
+            return None  # erased after the read above
         return envelope
 
     def custody_info(self, tenant: str, subject: str) -> dict:

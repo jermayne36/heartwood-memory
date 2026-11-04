@@ -168,7 +168,9 @@ def rewrap_tenant_keys(
         was_wrapped = is_wrapped_key(envelope)
         dek = old.unwrap(tenant=tenant, subject=subject, envelope=envelope)
         new_envelope = new_custodian.wrap(tenant=tenant, subject=subject, dek=dek)
-        store.put_key(tenant, subject, new_envelope)
+        if not store.put_key(tenant, subject, new_envelope):
+            skipped_shredded += 1  # erased after it was listed
+            continue
         updates += 1
         migrated += 1
         if was_wrapped:
