@@ -1,0 +1,17 @@
+id = "heartwood.memory"
+name = "Heartwood shared memory"
+version = "0.1.0"
+min_herdr_version = "0.9.5"
+description = "Signed, agent-tagged handoffs shared across panes in one repository."
+platforms = ["linux", "macos"]
+
+[[startup]]
+command = ["python3", "hook.py", "startup"]
+
+[[events]]
+on = "pane.agent_detected"
+command = ["python3", "hook.py", "event"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["python3", "hook.py", "event"]

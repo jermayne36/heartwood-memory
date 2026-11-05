@@ -1,0 +1,5 @@
+{
+  "repo_root": "/absolute/path/to/your/repo",
+  "db_path": "/absolute/path/outside/repo/heartwood.db",
+  "tenant": "tenant:my-project"
+}
