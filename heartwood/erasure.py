@@ -89,6 +89,12 @@ class KeyStore:
         if state == "shredded" or envelope is None:
             return None, state
         if is_wrapped_key(envelope):
+            # @fail-closed(raw-custodian-wrapped-dek): a wrapped envelope is never a raw key.
+            if isinstance(self.custodian, RawKeyCustodian):
+                raise RuntimeError(
+                    "Wrapped subject key requires custody. Configure the store's matching "
+                    "HEARTWOOD_KEY_CUSTODY_ROOT_B64 and HEARTWOOD_KEY_CUSTODY_KEY_ID."
+                )
             return self.custodian.unwrap(tenant=tenant, subject=subject, envelope=envelope), state
         if isinstance(self.custodian, RawKeyCustodian):
             return envelope, state

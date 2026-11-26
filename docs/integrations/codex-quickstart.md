@@ -41,6 +41,12 @@ SQLite opens the database on its first run.
 Safe default: read-only recall plus health. Add `remember` or `forget` only when
 the tenant has explicitly approved write or erasure access for Codex.
 
+If the shared store uses wrapped keys, the Codex-launched server needs the same
+`HEARTWOOD_KEY_CUSTODY_ROOT_B64` and `HEARTWOOD_KEY_CUSTODY_KEY_ID` as every other
+server opening that store, including if Codex has only read access. Supply the
+root through your secret manager when launching the server. The examples below
+show the configuration for a raw-local store.
+
 ```bash
 codex mcp add heartwood \
   --env HEARTWOOD_DB_PATH="$HEARTWOOD_DB_PATH" \

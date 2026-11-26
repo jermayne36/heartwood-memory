@@ -2,7 +2,10 @@
 import os
 import sys
 import tempfile
+from contextlib import closing
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -16,12 +19,14 @@ from heartwood import (  # noqa: E402
     rewrap_tenant_keys,
     rotate_tenant_root,
 )
+from heartwood.erasure import new_key  # noqa: E402
 from heartwood.importers.markdown import dev_models  # noqa: E402
 from heartwood.key_custody import envelope_key_id, is_wrapped_key  # noqa: E402
 from heartwood.store import Store  # noqa: E402
 
 
 TENANT = "tenant:acme"
+NO_ROOT_ERROR = r"HEARTWOOD_KEY_CUSTODY_ROOT_B64.*HEARTWOOD_KEY_CUSTODY_KEY_ID"
 
 
 def _db(path: Path, root_byte: int = 7) -> Heartwood:
@@ -33,6 +38,89 @@ def _db(path: Path, root_byte: int = 7) -> Heartwood:
         reranker=reranker,
         key_custodian=LocalKmsCustodian(bytes([root_byte]) * 32, key_id=f"test-root-{root_byte}"),
     )
+
+
+@pytest.fixture
+def without_custody_env(monkeypatch):
+    monkeypatch.delenv("HEARTWOOD_KEY_CUSTODY_ROOT_B64", raising=False)
+    monkeypatch.delenv("HEARTWOOD_KEY_CUSTODY_KEY_ID", raising=False)
+
+
+def _db_from_env(path: Path) -> Heartwood:
+    embedder, reranker = dev_models()
+    return Heartwood(path=path, tenant=TENANT, embedder=embedder, reranker=reranker)
+
+
+# @positive-control(raw-custodian-wrapped-dek)
+def test_no_root_reader_reports_missing_custody(tmp_path, without_custody_env):
+    path = tmp_path / "heartwood.db"
+    with closing(_db(path)) as writer:
+        mem_id = writer.remember("Wrapped test memory", subject="subject:test", created_by="agent:writer")
+    with closing(_db_from_env(path)) as reader:
+        principal = Principal(id="agent:reader", tenant=TENANT)
+        with pytest.raises(RuntimeError, match=NO_ROOT_ERROR):
+            reader.recall("Wrapped test memory", principal=principal)
+        with pytest.raises(RuntimeError, match=NO_ROOT_ERROR):
+            reader.read_content(mem_id)
+
+
+# @positive-control(raw-custodian-wrapped-dek)
+def test_no_root_writer_refuses_wrapped_subject(tmp_path, without_custody_env, monkeypatch):
+    path = tmp_path / "heartwood.db"
+    subject = "subject:test"
+    with closing(_db(path)) as writer:
+        mem_id = writer.remember("Wrapped test memory", subject=subject, created_by="agent:writer")
+
+    def unexpected_encryption(*_args):
+        pytest.fail("Wrapped subject without custody reached encryption")
+
+    with closing(_db_from_env(path)) as writer:
+        monkeypatch.setattr(writer.cipher, "encrypt", unexpected_encryption)
+        with pytest.raises(RuntimeError, match=NO_ROOT_ERROR):
+            writer.remember("Refused test memory", subject=subject, created_by="agent:other-writer")
+        assert writer.store.subject_ids(TENANT, subject) == [mem_id]
+    with closing(_db(path)) as reader:
+        assert reader.read_content(mem_id) == "Wrapped test memory"
+
+
+def test_raw_local_store_works_without_custody(tmp_path, without_custody_env):
+    path = tmp_path / "heartwood.db"
+    with closing(_db_from_env(path)) as writer:
+        mem_id = writer.remember("Raw test memory", subject="subject:test", created_by="agent:writer")
+        envelope, state = writer.store.get_key(TENANT, "subject:test")
+        assert state == "active"
+        assert envelope is not None and not is_wrapped_key(envelope)
+    with closing(_db_from_env(path)) as reader:
+        result = reader.recall("Raw test memory", principal=Principal(id="agent:reader", tenant=TENANT))
+        assert [row["id"] for row in result["results"]] == [mem_id]
+
+
+def test_hard_forget_purges_memory_encrypted_outside_custody(tmp_path, without_custody_env):
+    path = tmp_path / "heartwood.db"
+    wal_path = Path(f"{path}-wal")
+    subject = "subject:test"
+    with closing(_db(path)) as writer:
+        mem_id = writer.remember("Wrapped test memory", subject=subject, created_by="agent:writer")
+        kept_id = writer.remember("Unrelated test memory", subject="subject:keep", created_by="agent:writer")
+        # Model a legacy row whose ciphertext is independent of the subject DEK.
+        # Only payload bytes change in this temporary store; the purge sees normal metadata.
+        ciphertext = writer.cipher.encrypt("Out-of-custody test memory", new_key())
+        with writer.store.conn:
+            writer.store.conn.execute("UPDATE memories SET content_enc=? WHERE id=?", (ciphertext, mem_id))
+        assert writer.store.subject_ids(TENANT, subject) == [mem_id]
+        assert writer.read_content(mem_id) is None
+        assert ciphertext in wal_path.read_bytes()
+
+        with closing(_db_from_env(path)) as eraser:
+            result = eraser.forget(subject, mode="hard")
+            assert result["purged"] == 1
+            assert result["key_shredded"] is True
+            assert result["wal_residue_cleared"] is True
+            assert eraser.store.get_meta(mem_id) is None
+            assert eraser.store.get_key(TENANT, subject) == (None, "shredded")
+            assert ciphertext not in path.read_bytes()
+            assert not wal_path.exists() or wal_path.stat().st_size == 0
+        assert writer.read_content(kept_id) == "Unrelated test memory"
 
 
 def test_wrapped_dek_survives_restart_and_fails_closed_with_wrong_root():
