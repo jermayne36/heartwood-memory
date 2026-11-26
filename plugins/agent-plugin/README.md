@@ -9,7 +9,7 @@ component varies; see the verification record below.
 
 Prerequisites: a compatible Copilot client, Python 3.11 or newer, and
 [`uv`](https://docs.astral.sh/uv/getting-started/installation/) with `uvx` on the
-client's executable search path. The first launch downloads Heartwood 0.2.10
+client's executable search path. The first launch downloads Heartwood 0.2.11
 from PyPI and its dependencies. Heartwood may also download its pinned retrieval
 models; keep the same model environment when importing and recalling a store.
 No hosted Heartwood account or API key is needed.
@@ -65,12 +65,16 @@ developers.
 It is not a company-wide shared memory service. A fresh store is
 empty; empty recall is expected until an operator explicitly imports records.
 
+For a shared store that uses wrapped keys, every server that opens the store
+needs the same custody root and key ID, including the read-only plugin server.
+See the [key custody guide](../../docs/security/key-custody.md) for configuration.
+
 To evaluate with one synthetic record, run this before the first server start,
 with an **absolute** path to `~/.heartwood/agent-plugin/heartwood.db`. This is an explicit operator write outside the plugin;
 use a new evaluation store, never an existing customer database.
 
 ```bash
-uvx --from heartwood-memory==0.2.10 python - /absolute/home/.heartwood/agent-plugin/heartwood.db <<'PY'
+uvx --from heartwood-memory==0.2.11 python - /absolute/home/.heartwood/agent-plugin/heartwood.db <<'PY'
 import sys
 from pathlib import Path
 from heartwood import Heartwood
@@ -113,7 +117,7 @@ rollout process:
   "allowedMcpServers": [
     {
       "serverCommand": [
-        "uvx", "--from", "heartwood-memory==0.2.10", "python", "-c",
+        "uvx", "--from", "heartwood-memory==0.2.11", "python", "-c",
         "from pathlib import Path; import os; from heartwood.adapters.mcp_server import main; p=Path.home()/'.heartwood'/'agent-plugin'; p.mkdir(parents=True, exist_ok=True); os.chdir(p); main()"
       ]
     }

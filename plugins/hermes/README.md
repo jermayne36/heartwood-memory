@@ -25,9 +25,13 @@ In the setup picker, select **heartwood**, then accept or change the local
 SQLite path and tenant. The default path is `$HERMES_HOME/heartwood.sqlite`;
 non-secret settings are saved to `$HERMES_HOME/heartwood.json`.
 Start a new Hermes session, then check `hermes memory status`.
-The plugin declares `heartwood-memory==0.2.10`; Hermes prepares that dependency
+The plugin declares `heartwood-memory==0.2.11`; Hermes prepares that dependency
 in its managed environment. Do not pip-install into an existing managed Hermes
-environment. The tiny session-switch shim supports the published 0.2.10 adapter.
+environment. The published adapter handles Hermes session switches directly.
+
+For a shared store that uses wrapped keys, every server that opens the store
+needs the same custody root and key ID, including servers that only read.
+See the [key custody guide](../../docs/security/key-custody.md) for configuration.
 
 The entry is not in the live catalog yet. Only after maintainer approval and
 upstream acceptance will `hermes plugins install heartwood` resolve by name. Community

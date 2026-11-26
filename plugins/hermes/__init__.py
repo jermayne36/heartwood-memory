@@ -1,15 +1,7 @@
-"""Thin Hermes directory plugin backed by the public Heartwood evaluation package."""
+"""Thin Hermes directory plugin backed by the public Heartwood Memory 0.2.11 package."""
 from typing import Any
 
-from heartwood.adapters.hermes import HeartwoodHermesMemoryProvider as _Provider
-
-
-class HeartwoodHermesMemoryProvider(_Provider):
-    """Keep the published 0.2.10 adapter compatible with Hermes session switches."""
-
-    def on_session_switch(self, new_session_id: str, **kwargs: Any) -> None:
-        # 0.2.10 predates this hook; keep the shim until the next package release.
-        self.session_id = new_session_id or "default"
+from heartwood.adapters.hermes import HeartwoodHermesMemoryProvider
 
 
 def register(ctx: Any) -> None:

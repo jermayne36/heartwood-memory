@@ -93,7 +93,7 @@ memory, provenance, mcp, read-only
 
 The public package is an evaluation adapter with one Agent Skills file and one
 stdio MCP server configuration. The server installs the published
-`heartwood-memory==0.2.10` PyPI package via `uvx`. A small standard-library startup
+`heartwood-memory==0.2.11` PyPI package via `uvx`. A small standard-library startup
 expression creates a per-user local data directory and calls the published MCP
 entry point. The explicit server allowlist exposes only `recall`, `explain_recall`,
 and `health`. The skill treats memories as evidence, cites their returned IDs

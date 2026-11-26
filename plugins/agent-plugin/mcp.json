@@ -6,7 +6,7 @@
       "command": "uvx",
       "args": [
         "--from",
-        "heartwood-memory==0.2.10",
+        "heartwood-memory==0.2.11",
         "python",
         "-c",
         "from pathlib import Path; import os; from heartwood.adapters.mcp_server import main; p=Path.home()/'.heartwood'/'agent-plugin'; p.mkdir(parents=True, exist_ok=True); os.chdir(p); main()"
