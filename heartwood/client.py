@@ -1583,6 +1583,7 @@ class Heartwood:
         }
 
     def forget(self, subject, *, mode="hard", actor="system", reason="", legal_basis=""):
+        """Hard forget reports whether SQLite confirmed truncation of its WAL."""
         hard = mode == "hard"
         if not hard:
             self.audit.append(
@@ -1655,6 +1656,7 @@ class Heartwood:
             return {
                 **response_payload, "receipt": None, "proof_status": "UNAVAILABLE",
                 "receipt_unavailable_reason": "no_durable_signing_root",
+                "wal_residue_cleared": self.store.truncate_wal(),
             }
 
         issued_at = _utc_now_iso()
@@ -1698,10 +1700,6 @@ class Heartwood:
                 holder["commitment"], audit_row_hash=transition["row_hash"],
                 anchor_writer=self._anchor_writer, kind="erasure",
             )
-            return {
-                **response_payload, "receipt": receipt, "proof_status": "AVAILABLE",
-                "receipt_unavailable_reason": None,
-            }
         except Exception as exc:
             # @fail-closed(post-erasure-receipt-failure): no unsigned object is emitted.
             self.store.record_receipt_failure(
@@ -1711,10 +1709,18 @@ class Heartwood:
                 key_state_after=key_state, failure_stage="audit_or_signing",
                 error_class=type(exc).__name__,
             )
-            return {
-                **response_payload, "receipt": None, "proof_status": "UNAVAILABLE",
-                "receipt_unavailable_reason": "post_erasure_receipt_failure",
-            }
+            receipt = None
+            unavailable_reason = "post_erasure_receipt_failure"
+        else:
+            unavailable_reason = None
+
+        # Report live SQLite cleanup separately from the signed receipt.
+        return {
+            **response_payload, "receipt": receipt,
+            "proof_status": "AVAILABLE" if receipt is not None else "UNAVAILABLE",
+            "receipt_unavailable_reason": unavailable_reason,
+            "wal_residue_cleared": self.store.truncate_wal(),
+        }
 
     # -- trusted internals (same-process adapters: e.g. memory-tool backend) --- #
     def can_read(self, principal: Principal, meta: dict | None) -> bool:

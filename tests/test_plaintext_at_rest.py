@@ -223,19 +223,11 @@ def test_plaintext_is_absent_from_sqlite_at_rest_and_after_hard_forget():
                     "SELECT COUNT(*) FROM memories WHERE id=?", (memory_id,)
                 ).fetchone()[0]
             )
-            # A VACUUM performed by the remediation writes rebuilt pages to the
-            # WAL in WAL mode. Checkpoint after forget so the main-file scan sees
-            # the post-remediation image rather than the pre-VACUUM image.
-            observations["after_forget_checkpoint"] = _checkpoint(forget_db)
+            assert receipt["wal_residue_cleared"] is True
+            observations["after_forget_positive_hits"] = _storage_hits(forget_path, POSITIVE_SENTINEL)
+            observations["after_forget_encrypted_only_hits"] = _storage_hits(forget_path, ENCRYPTED_ONLY_SENTINEL)
         finally:
             forget_db.close()
-
-        observations["after_forget_positive_hits"] = _storage_hits(
-            forget_path, POSITIVE_SENTINEL
-        )
-        observations["after_forget_encrypted_only_hits"] = _storage_hits(
-            forget_path, ENCRYPTED_ONLY_SENTINEL
-        )
 
     print("PLAINTEXT_AT_REST_CONTROL " + json.dumps(observations, sort_keys=True))
 

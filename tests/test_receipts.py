@@ -262,7 +262,10 @@ def test_erasure_receipt_and_store_controls(tmp_path):
             policy=Policy(),
         )
         response = db.forget("subject:erase", actor="agent:privacy")
+        assert response["wal_residue_cleared"] is True
+        assert db_path.with_name(f"{db_path.name}-wal").stat().st_size == 0
         receipt = response["receipt"]
+        assert "wal_residue_cleared" not in receipt["payload"]
         bundle, checkpoint = _bundle(
             db, db_path, anchors_path, fingerprint, tmp_path,
         )
@@ -334,7 +337,7 @@ def test_missing_signer_and_post_erasure_signing_failure_emit_no_receipt(tmp_pat
 
     signed_path = tmp_path / "signed"
     signed_path.mkdir()
-    db, _db_path, _anchors_path, _fingerprint = _db(signed_path)
+    db, db_path, _anchors_path, _fingerprint = _db(signed_path)
     try:
         db.remember(
             "post failure", subject="subject:failure", created_by="agent:p", policy=Policy(),
@@ -347,6 +350,8 @@ def test_missing_signer_and_post_erasure_signing_failure_emit_no_receipt(tmp_pat
         # @positive-control(post-erasure-receipt-failure)
         assert erased["receipt"] is None
         assert erased["proof_status"] == "UNAVAILABLE"
+        assert erased["wal_residue_cleared"] is True
+        assert db_path.with_name(f"{db_path.name}-wal").stat().st_size == 0
         failure = db.store.conn.execute(
             "SELECT failure_stage,error_class FROM receipt_failures"
         ).fetchone()
