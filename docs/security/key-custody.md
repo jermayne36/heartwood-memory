@@ -96,8 +96,7 @@ material = provision_tenant_root("tenant:acme", key_id="tenant:acme-root-v1")
 custodian = material.custodian()
 ```
 
-Migrate a legacy raw-local store into wrapped custody, or re-wrap DEKs during an
-owner-approved root rotation:
+Migrate a legacy raw-local store into wrapped custody:
 
 ```python
 from heartwood import LocalKmsCustodian, RawKeyCustodian, rewrap_tenant_keys
@@ -114,9 +113,17 @@ report = rewrap_tenant_keys(
 assert report.complete
 ```
 
+When rewrapping an already-wrapped store under a different root, pass its
+existing `LocalKmsCustodian` to `rewrap_tenant_keys(...)` as `old_custodian`.
+A `RawKeyCustodian` asked to unwrap a wrapped key raises `RuntimeError` with
+a message beginning "Wrapped subject key requires custody".
+Bulk rewrap commits each subject separately, so any subjects completed before
+a refusal stay migrated and rerunning with the correct old custodian resumes
+the migration.
+
 For root rotation, use `rotate_tenant_root(...)` so DEKs are re-wrapped and
 legacy provenance public-key aliases are registered in the same operation.
-Rotation of an existing production root remains owner-gated under Rule 45.
+Rotation of an existing production root requires your organization's approval.
 
 To verify local crypto-erase after root destruction, use
 `prove_crypto_erase_path(db_path, tenant=..., root_present=False)`. The proof is
