@@ -17,6 +17,7 @@ from types import ModuleType
 
 import numpy as np
 
+from .audit import AuditLog
 from .envelope import default_truth_status
 
 _SCHEMA = """
@@ -171,6 +172,26 @@ class Store:
 
     def close(self):
         self.conn.close()
+
+    def truncate_wal(self) -> bool:
+        """Confirm WAL truncation, with a short retry window for pinned readers."""
+        timeout_ms = int(self.conn.execute("PRAGMA busy_timeout").fetchone()[0])
+        try:
+            # Normal writes can wait much longer than the final cleanup attempt.
+            self.conn.execute("PRAGMA busy_timeout=50")
+            for delay in (0, 0.01, 0.02):
+                if delay:
+                    time.sleep(delay)
+                result = self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                if result[0] != 1:
+                    # SQLite reports -1 frame counts if there is no WAL to checkpoint.
+                    # @fail-closed(erasure-wal-truncated)
+                    return tuple(result) == (0, 0, 0)
+        except sqlite3.Error:
+            return False  # The operation is committed, but truncation is unconfirmed.
+        finally:
+            self.conn.execute(f"PRAGMA busy_timeout={timeout_ms}")
+        return False
 
     # -- memories -------------------------------------------------------- #
     def insert_memory_superseding(
@@ -837,7 +858,7 @@ class Store:
         return len(ids)
 
     # -- keys (crypto-shred) -------------------------------------------- #
-    def get_key(self, tenant, subject):
+    def get_key(self, tenant: str, subject: str) -> tuple[bytes | None, str | None]:
         r = self.conn.execute("SELECT dek,state FROM keys WHERE tenant=? AND subject=?",
                               (tenant, subject)).fetchone()
         return (None, None) if not r else (r["dek"], r["state"])
@@ -882,6 +903,22 @@ class Store:
         )
         self.conn.commit()
         return cur.rowcount == 1
+
+    def rewrap_raw_key(
+        self, tenant: str, subject: str, *, expected_dek: bytes, wrapped_dek: bytes,
+    ) -> bool:
+        """Replace the observed active key and audit the change in one transaction."""
+        with self.conn:
+            cur = self.conn.execute(
+                "UPDATE keys SET dek=? WHERE tenant=? AND subject=? AND state='active' AND dek=?",
+                (wrapped_dek, tenant, subject, expected_dek),
+            )
+            if cur.rowcount != 1:
+                return False
+            action = "key_rewrap"
+            body = AuditLog.body(tenant, "system", action, subject, {"mode": "raw_to_custody"})
+            self.append_audit_in_transaction(tenant, "system", action, subject, body)
+        return True
 
     def shred_key(self, tenant, subject):
         self.conn.execute(

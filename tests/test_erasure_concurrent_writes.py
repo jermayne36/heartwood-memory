@@ -19,8 +19,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from heartwood import Heartwood, LocalKmsCustodian  # noqa: E402
+from heartwood import Heartwood, LocalKmsCustodian, RawKeyCustodian  # noqa: E402
 from heartwood.importers.markdown import dev_models  # noqa: E402
+from heartwood.key_custody import KeyCustodian  # noqa: E402
 from heartwood.key_lifecycle import rewrap_tenant_keys  # noqa: E402
 from heartwood.store import load_sqlite_vec  # noqa: E402
 
@@ -59,9 +60,9 @@ print(json.dumps(result))
 """
 
 
-def _client(db_path: Path, *, index: str = "numpy") -> Heartwood:
+def _client(db_path: Path, *, index: str = "numpy", custodian: KeyCustodian | None = None) -> Heartwood:
     embedder, reranker = dev_models()
-    custodian = LocalKmsCustodian(
+    custodian = custodian or LocalKmsCustodian(
         bytes.fromhex(CUSTODY_ROOT_HEX), key_id=CUSTODY_KEY_ID, retention_floor_seconds=0,
     )
     return Heartwood(path=db_path, tenant=TENANT, embedder=embedder, reranker=reranker,
@@ -360,6 +361,69 @@ def test_rewrap_does_not_reactivate_a_key_shredded_after_it_was_listed(tmp_path)
         db.close()
     assert (report.migrated, report.skipped_shredded) == (0, 1)
     assert _key_state(db_path, subject) == [("shredded", 1)]
+
+
+@pytest.mark.parametrize("access", ["read", "write"])
+def test_lazy_custody_rewrap_loses_to_hard_forget(tmp_path, access):
+    db_path, subject = tmp_path / "heartwood.db", "customer:raw-erasure"
+    with closing(_client(db_path, custodian=RawKeyCustodian())) as raw, closing(_client(db_path)) as migrator:
+        mem_id = raw.remember("Sensitive raw-local note", subject=subject, created_by="agent:writer")
+        fired = _after_first_call(
+            migrator.store, "get_key", lambda: raw.forget(subject, mode="hard"),
+        )
+        if access == "read":
+            assert migrator.read_content(mem_id) is None
+        else:
+            with pytest.raises(KeyError, match="key shredded"):
+                migrator.remember("Late write", subject=subject, created_by="agent:writer")
+        assert fired
+        stayed_shredded = migrator.store.get_key(TENANT, subject) == (None, "shredded")
+        assert stayed_shredded
+        assert migrator.store.get_meta(mem_id) is None
+        assert "key_rewrap" not in {row["action"] for row in migrator.store.audit_rows_for_target(subject)}
+
+
+def test_lazy_custody_rewrap_keeps_newer_envelope(tmp_path):
+    db_path, subject = tmp_path / "heartwood.db", "customer:raw-rewrap"
+    with (
+        closing(_client(db_path, custodian=RawKeyCustodian())) as raw,
+        closing(_client(db_path)) as migrator,
+        closing(_client(db_path)) as winner,
+    ):
+        raw.remember("Raw-local note", subject=subject, created_by="agent:writer")
+        newer_dek = b"\xb0" * 32
+        newer_envelope = winner.keys.custodian.wrap(tenant=TENANT, subject=subject, dek=newer_dek)
+        fired = _after_first_call(
+            migrator.store, "get_key", lambda: winner.store.put_key(TENANT, subject, newer_envelope),
+        )
+
+        read_dek = migrator.keys.get(TENANT, subject)
+
+        assert fired
+        read_newer_dek = read_dek == newer_dek
+        kept_newer_envelope = migrator.store.get_key(TENANT, subject) == (newer_envelope, "active")
+        assert kept_newer_envelope
+        assert read_newer_dek
+
+
+def test_lazy_custody_rewrap_audits_only_the_winning_update(tmp_path):
+    db_path, subject = tmp_path / "heartwood.db", "customer:raw-rewrap"
+    with (
+        closing(_client(db_path, custodian=RawKeyCustodian())) as raw,
+        closing(_client(db_path)) as migrator,
+        closing(_client(db_path)) as winner,
+    ):
+        mem_id = raw.remember("Raw-local note", subject=subject, created_by="agent:writer")
+
+        def peer_reads() -> None:
+            assert winner.read_content(mem_id) == "Raw-local note"
+
+        fired = _after_first_call(migrator.store, "get_key", peer_reads)
+        assert migrator.read_content(mem_id) == "Raw-local note"
+        assert fired
+        events = migrator.store.audit_rows_for_target(subject)
+        assert [row["action"] for row in events].count("key_rewrap") == 1
+        assert migrator.audit.verify_chain()
 
 
 # -- the sqlite-vec index lives in the shared database file ----------------- #

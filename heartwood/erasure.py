@@ -16,7 +16,7 @@ import base64
 import os
 
 from .key_custody import KeyCustodian, RawKeyCustodian, custodian_from_env, is_wrapped_key
-from .store import erased_subject_error
+from .store import Store, erased_subject_error
 
 try:
     from cryptography.fernet import Fernet
@@ -53,7 +53,7 @@ class KeyStore:
     """Per-subject data-encryption keys. Production: external KMS. Here: the
     `keys` table (so the demo is self-contained), with shred = key destruction."""
 
-    def __init__(self, store, custodian: KeyCustodian | None = None):
+    def __init__(self, store: Store, custodian: KeyCustodian | None = None):
         self.store = store
         self.custodian = custodian or custodian_from_env()
 
@@ -71,31 +71,38 @@ class KeyStore:
             raise erased_subject_error(subject)
         if envelope is None:
             raise RuntimeError(f"subject {subject} has a key row without key material")
-        if is_wrapped_key(envelope):
-            return self.custodian.unwrap(tenant=tenant, subject=subject, envelope=envelope)
-        if isinstance(self.custodian, RawKeyCustodian):
-            return envelope
-        # First access after enabling custody on an old raw-local store.
-        if not self.store.put_key(
-            tenant, subject, self.custodian.wrap(tenant=tenant, subject=subject, dek=envelope),
-        ):
-            raise erased_subject_error(subject)
-        return envelope
+        resolved_key, state = self._resolve_key(tenant, subject, envelope, state)
+        if resolved_key is None:
+            if state == "shredded":
+                raise erased_subject_error(subject)
+            raise RuntimeError("subject key changed during custody migration")
+        return resolved_key
 
     def get(self, tenant: str, subject: str) -> bytes | None:
         envelope, state = self.store.get_key(tenant, subject)
+        key, _ = self._resolve_key(tenant, subject, envelope, state)
+        return key
+
+    def _resolve_key(
+        self, tenant: str, subject: str, envelope: bytes | None, state: str | None,
+    ) -> tuple[bytes | None, str | None]:
         if state == "shredded" or envelope is None:
-            return None
+            return None, state
         if is_wrapped_key(envelope):
-            return self.custodian.unwrap(tenant=tenant, subject=subject, envelope=envelope)
+            return self.custodian.unwrap(tenant=tenant, subject=subject, envelope=envelope), state
         if isinstance(self.custodian, RawKeyCustodian):
-            return envelope
+            return envelope, state
         # Migrate old raw-local stores lazily when custody is enabled.
-        if not self.store.put_key(
-            tenant, subject, self.custodian.wrap(tenant=tenant, subject=subject, dek=envelope),
+        wrapped = self.custodian.wrap(tenant=tenant, subject=subject, dek=envelope)
+        if self.store.rewrap_raw_key(
+            tenant, subject, expected_dek=envelope, wrapped_dek=wrapped,
         ):
-            return None  # erased after the read above
-        return envelope
+            return envelope, state
+        # A concurrent migration can supply a usable envelope. Never use the stale DEK.
+        current, state = self.store.get_key(tenant, subject)
+        if state == "active" and current is not None and is_wrapped_key(current):
+            return self.custodian.unwrap(tenant=tenant, subject=subject, envelope=current), state
+        return None, state
 
     def custody_info(self, tenant: str, subject: str) -> dict:
         envelope, state = self.store.get_key(tenant, subject)
