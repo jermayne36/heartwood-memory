@@ -60,8 +60,10 @@ In 0.2.10, a process without the root silently skipped memories it could not
 decrypt. When that process wrote to a subject with a wrapped key, it encrypted
 the new memory with a fixed, non-secret key. If a subject received
 those writes, `forget(subject, mode="hard")` purges its memory rows from the
-active store, including valid memories for that subject. Copies made before
-the purge are outside its scope.
+active store, including valid memories for that subject and memories that name
+it as an alias. It also purges their provenance descendants, including those
+under other subjects, and permanently tombstones the subject so later writes
+that name it are refused. Copies made before the purge are outside its scope.
 
 The custody check now raises an error naming `HEARTWOOD_KEY_CUSTODY_ROOT_B64`
 and `HEARTWOOD_KEY_CUSTODY_KEY_ID` when a process without the root tries to read

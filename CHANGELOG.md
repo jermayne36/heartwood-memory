@@ -2,7 +2,7 @@
 
 All notable changes to `heartwood-memory` are documented here.
 
-## [Unreleased]
+## [0.2.11] - 2026-11-26
 
 ### Security
 - A server without a custody root now raises a configuration error when it
@@ -11,7 +11,10 @@ All notable changes to `heartwood-memory` are documented here.
   reads without the root silently skipped memories they could not decrypt, and
   writes to wrapped subjects used a fixed, non-secret encryption key. If a
   subject received those writes, `forget(subject, mode="hard")` purges its
-  memory rows from the active store, including valid memories for that subject.
+  memory rows from the active store, including valid memories for that subject
+  and memories that name it as an alias. It also purges their provenance
+  descendants, including those under other subjects, and permanently
+  tombstones the subject so later writes that name it are refused.
   Bulk rewrap also refuses wrapped keys when it lacks the old custody needed
   to unwrap them.
 - Hard erasure stays final when another process writes to the same store. Before, a write that was in progress when `forget(mode="hard")` ran could still land a row for the erased subject after the receipt was issued, and the first write for a new subject could overwrite the erasure's shredded-key tombstone with a working key. Now:
