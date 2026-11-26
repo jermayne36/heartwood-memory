@@ -24,6 +24,10 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.keywrap import aes_key_unwrap, aes_key_wrap
 
 ENVELOPE_PREFIX = b"hwkw1:"
+WRAPPED_KEY_CUSTODY_ERROR = (
+    "Wrapped subject key requires custody. Configure the store's matching "
+    "HEARTWOOD_KEY_CUSTODY_ROOT_B64 and HEARTWOOD_KEY_CUSTODY_KEY_ID."
+)
 
 
 def _validate_retention_floor_seconds(value: int | None) -> int | None:
@@ -127,6 +131,9 @@ class KeyCustodian:
         return dek
 
     def unwrap(self, *, tenant: str, subject: str, envelope: bytes) -> bytes:
+        # @fail-closed(default-unwrap-wrapped-dek)
+        if is_wrapped_key(envelope):
+            raise RuntimeError(WRAPPED_KEY_CUSTODY_ERROR)
         return envelope
 
     def info(self, envelope: bytes | None = None) -> dict:

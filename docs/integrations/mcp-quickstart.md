@@ -36,7 +36,10 @@ The repo includes this directly runnable, read-only config:
 ```
 
 Override `HEARTWOOD_DB_PATH` when you want MCP to use the same store built by
-`import-markdown` or `bulk-remember`.
+`import-markdown` or `bulk-remember`. If that store uses wrapped keys, give every
+server that opens it the same `HEARTWOOD_KEY_CUSTODY_ROOT_B64` and
+`HEARTWOOD_KEY_CUSTODY_KEY_ID`, including read-only servers. Supply the root
+through your secret manager when launching the server.
 
 The starter config names only the read-only subset (`recall`, `explain_recall`,
 `health`); see the next section to enable write or erasure tools. If the variable
@@ -116,7 +119,8 @@ The test verifies:
 ## Use With A Derived Store
 
 Point `HEARTWOOD_DB_PATH` at the same SQLite database used by the warm recall
-service:
+service. If it uses wrapped keys, supply the same custody root and key ID to
+the MCP process as described above.
 
 ```powershell
 $env:HEARTWOOD_DB_PATH = ".\heartwood.db"

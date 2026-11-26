@@ -64,7 +64,10 @@ heartwood bulk-remember --input .\records.jsonl --db .\heartwood.db
 ```
 
 When the env var is present, newly created subject DEKs are stored as wrapped
-envelopes rather than raw key bytes.
+envelopes. A process with the root also wraps existing raw keys when it first
+resolves them, including during recall. After that, every process that opens the
+shared store needs the same custody root and key ID, including read-only
+servers. Configure the shared root and key ID before the first write.
 
 ## Python API
 
