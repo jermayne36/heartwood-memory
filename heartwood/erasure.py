@@ -15,7 +15,13 @@ from __future__ import annotations
 import base64
 import os
 
-from .key_custody import KeyCustodian, RawKeyCustodian, custodian_from_env, is_wrapped_key
+from .key_custody import (
+    WRAPPED_KEY_CUSTODY_ERROR,
+    KeyCustodian,
+    RawKeyCustodian,
+    custodian_from_env,
+    is_wrapped_key,
+)
 from .store import Store, erased_subject_error
 
 try:
@@ -90,11 +96,11 @@ class KeyStore:
             return None, state
         if is_wrapped_key(envelope):
             # @fail-closed(raw-custodian-wrapped-dek): a wrapped envelope is never a raw key.
-            if isinstance(self.custodian, RawKeyCustodian):
-                raise RuntimeError(
-                    "Wrapped subject key requires custody. Configure the store's matching "
-                    "HEARTWOOD_KEY_CUSTODY_ROOT_B64 and HEARTWOOD_KEY_CUSTODY_KEY_ID."
-                )
+            if (
+                isinstance(self.custodian, RawKeyCustodian)
+                or getattr(self.custodian.unwrap, "__func__", None) is KeyCustodian.unwrap
+            ):
+                raise RuntimeError(WRAPPED_KEY_CUSTODY_ERROR)
             return self.custodian.unwrap(tenant=tenant, subject=subject, envelope=envelope), state
         if isinstance(self.custodian, RawKeyCustodian):
             return envelope, state

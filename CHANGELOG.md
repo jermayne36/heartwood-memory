@@ -7,8 +7,13 @@ All notable changes to `heartwood-memory` are documented here.
 ### Security
 - A server without a custody root now raises a configuration error when it
   reads or writes a subject with a wrapped data-encryption key. The error names
-  `HEARTWOOD_KEY_CUSTODY_ROOT_B64` and `HEARTWOOD_KEY_CUSTODY_KEY_ID`. Reads no
-  longer skip those memories silently, and writes are refused before encryption.
+  `HEARTWOOD_KEY_CUSTODY_ROOT_B64` and `HEARTWOOD_KEY_CUSTODY_KEY_ID`. In 0.2.10,
+  reads without the root silently skipped memories they could not decrypt, and
+  writes to wrapped subjects used a fixed, non-secret encryption key. If a
+  subject received those writes, `forget(subject, mode="hard")` purges its
+  memory rows from the active store, including valid memories for that subject.
+  Bulk rewrap also refuses wrapped keys when it lacks the old custody needed
+  to unwrap them.
 - Hard erasure stays final when another process writes to the same store. Before, a write that was in progress when `forget(mode="hard")` ran could still land a row for the erased subject after the receipt was issued, and the first write for a new subject could overwrite the erasure's shredded-key tombstone with a working key. Now:
   - `remember()` checks inside its write transaction that no subject it names (the subject or any `subject_ids` alias) has been erased, and raises `KeyError` if one has. A later write that names an erased alias is refused the same way.
   - `remember(derived_from=...)` raises `RuntimeError` if a parent it read was deleted before the write committed.

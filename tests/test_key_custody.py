@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from heartwood import (  # noqa: E402
     Heartwood,
+    KeyCustodian,
     LocalKmsCustodian,
     Principal,
     RawKeyCustodian,
@@ -65,7 +66,8 @@ def test_no_root_reader_reports_missing_custody(tmp_path, without_custody_env):
 
 
 # @positive-control(raw-custodian-wrapped-dek)
-def test_no_root_writer_refuses_wrapped_subject(tmp_path, without_custody_env, monkeypatch):
+@pytest.mark.parametrize("custodian", [None, KeyCustodian()], ids=["from-env", "base-custodian"])
+def test_no_root_writer_refuses_wrapped_subject(tmp_path, without_custody_env, monkeypatch, custodian):
     path = tmp_path / "heartwood.db"
     subject = "subject:test"
     with closing(_db(path)) as writer:
@@ -74,12 +76,16 @@ def test_no_root_writer_refuses_wrapped_subject(tmp_path, without_custody_env, m
     def unexpected_encryption(*_args):
         pytest.fail("Wrapped subject without custody reached encryption")
 
-    with closing(_db_from_env(path)) as writer:
+    embedder, reranker = dev_models()
+    with closing(Heartwood(
+        path=path, tenant=TENANT, embedder=embedder, reranker=reranker, key_custodian=custodian,
+    )) as writer:
         monkeypatch.setattr(writer.cipher, "encrypt", unexpected_encryption)
         with pytest.raises(RuntimeError, match=NO_ROOT_ERROR):
             writer.remember("Refused test memory", subject=subject, created_by="agent:other-writer")
         assert writer.store.subject_ids(TENANT, subject) == [mem_id]
     with closing(_db(path)) as reader:
+        assert reader.store.subject_ids(TENANT, subject) == [mem_id]
         assert reader.read_content(mem_id) == "Wrapped test memory"
 
 
@@ -196,6 +202,37 @@ def test_provisioned_tenant_root_writes_wrapped_envelopes():
             assert envelope_key_id(envelope) == "tenant-acme-root-v1"
         finally:
             db.close()
+
+
+# @positive-control(default-unwrap-wrapped-dek)
+@pytest.mark.parametrize(
+    ("old_key_id", "expected_remainder"), [("old-a", 0), ("old-ab", 1)],
+    ids=["aligned", "unaligned"],
+)
+@pytest.mark.parametrize("old_custodian", [RawKeyCustodian(), None], ids=["raw", "omitted"])
+def test_rewrap_refuses_wrapped_key_without_old_custody(
+    tmp_path, monkeypatch, old_key_id, expected_remainder, old_custodian,
+):
+    path = tmp_path / "heartwood.db"
+    subject = "subject:test"
+    old = LocalKmsCustodian(bytes([21]) * 32, key_id=old_key_id)
+    new = LocalKmsCustodian(bytes([31]) * 32, key_id="new-root")
+    envelope = old.wrap(tenant=TENANT, subject=subject, dek=new_key())
+    remainder = len(envelope) % 8
+    assert remainder == expected_remainder
+
+    def unexpected_put_key(*_args):
+        pytest.fail("Rewrap without the old custody reached put_key")
+
+    with closing(Store(str(path))) as store:
+        assert store.create_key(TENANT, subject, envelope) == (envelope, "active")
+        monkeypatch.setattr(store, "put_key", unexpected_put_key)
+        with pytest.raises(RuntimeError, match=NO_ROOT_ERROR):
+            rewrap_tenant_keys(
+                store, tenant=TENANT, old_custodian=old_custodian, new_custodian=new,
+            )
+    with closing(Store(str(path))) as store:
+        assert store.get_key(TENANT, subject) == (envelope, "active")
 
 
 def test_rewrap_migrator_raw_to_wrapped_is_resumable_and_idempotent():
